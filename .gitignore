@@ -1,5 +1,25 @@
-output/
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# PyCharm
 .idea/
-*.png
+
+# Virtual environments
+venv/
+.env
+env/
+
+# Output files (generated)
+output/*.png
+output/*.jpg
+output/*.pdf
+
+# Data placeholders
+data/wltp_cycle.csv
+
+# OS
+.DS_Store
+Thumbs.db
