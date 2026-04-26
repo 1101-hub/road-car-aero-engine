@@ -153,4 +153,4 @@ road-car-aero-engine/
 
 ---
 
-*Part of a physics-first computational design methodology. Related project: F1 driver cooling vest thermal management (ATMS, May 2025).*
+*Part of a physics-first computational design methodology.*
