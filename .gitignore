@@ -17,6 +17,9 @@ output/*.png
 output/*.jpg
 output/*.pdf
 
+# Except the showcase image
+!output/pareto_maruti_swift.png
+
 # Data placeholders
 data/wltp_cycle.csv
 
