@@ -189,7 +189,7 @@ aero_engine/
 
 1. **2D model:** The panel method is a 2D cross-section approximation. Real cars are 3D. The 2D→3D scaling uses an area ratio correction; 3D effects like A-pillar vortices and mirror wake are not captured. Error acknowledged and quantified in the validation table.
 
-2. **WLTP reconstruction:** The cycle is reconstructed from published phase waypoints, not the official 1Hz trace. Distance error: ~22% high (28.4 km vs 23.3 km official). Fuel savings ra![img.png](img.png)tios (ΔCd effects) are unaffected since baseline and modified use the same cycle.
+2. **WLTP reconstruction:** The cycle is reconstructed from published phase waypoints, not the official 1Hz trace. Distance error: ~22% high (28.4 km vs 23.3 km official). Fuel savings ratios (ΔCd effects) are unaffected since baseline and modified use the same cycle.
 
 3. **Modification interactions:** The interaction correction between diffuser + skirts (+8%) and panel + diffuser (+5%) is empirically estimated, not derived from first principles. Conservative values used.
 
