@@ -8,10 +8,29 @@ Built for India's 330 million existing petrol and diesel vehicles that receive z
 
 ---
 
-## Example output — Maruti Swift (2024)
+## Output gallery
 
-![Pareto optimisation output](output/pareto_maruti_swift.png)
-Baseline Cd : 0.308   (manufacturer ref: 0.320, error: 3.7%)
+### Maruti Suzuki Swift (2024)
+![Maruti Swift Pareto](output/pareto_maruti_swift.png)
+
+### Hyundai i20 (2023)
+![Hyundai i20 Pareto](output/pareto_hyundai_i20.png)
+
+### Tata Nexon (2023)
+![Tata Nexon Pareto](output/pareto_tata_nexon.png)
+
+### Hyundai Creta (2024)
+![Hyundai Creta Pareto](output/pareto_hyundai_creta.png)
+
+### Validation — all archetypes
+![Validation](output/validation_archetypes.png)
+
+### WLTP drive cycle
+![WLTP cycle](output/wltp_cycle.png)
+
+---
+
+## Example output — Maruti Swift (2024)Baseline Cd : 0.308   (manufacturer ref: 0.320, error: 3.7%)
 Tier 1 — Minimal (bolt-on, ₹500–2000):
 Wheel covers (4 wheels)
 Saves 0.16 L/100km · ₹2,437/year · 0.66 tonnes CO₂ over 12 years
@@ -20,9 +39,7 @@ Rear diffuser (7°, 480mm length)
 Saves 0.78 L/100km · ₹12,010/year · 3.23 tonnes CO₂ over 12 years
 Tier 3 — Aggressive:
 Wheel covers + rear diffuser
-Saves 0.94 L/100km · ₹14,447/year · 3.89 tonnes CO₂ over 12 years
-
----
+Saves 0.94 L/100km · ₹14,447/year · 3.89 tonnes CO₂ over 12 years---
 
 ## Why this exists
 
@@ -58,10 +75,7 @@ Requirements: Python 3.10+, numpy, scipy, matplotlib.
 
 ### Layer 1 — 2D Source Panel Method
 
-The car's longitudinal cross-section is discretised into N flat panels. A fluid source of strength σⱼ is placed on each panel j. The boundary condition (no flow through the surface) gives a linear system:
-[A]{σ} = {b}
-
-- `A[i,j]` = normal velocity at control point i from unit source on panel j (Katz & Plotkin 2001, Eq. 10.23)
+The car's longitudinal cross-section is discretised into N flat panels. A fluid source of strength σⱼ is placed on each panel j. The boundary condition (no flow through the surface) gives a linear system:[A]{σ} = {b}- `A[i,j]` = normal velocity at control point i from unit source on panel j (Katz & Plotkin 2001, Eq. 10.23)
 - `b[i]` = negative of freestream normal component at panel i
 
 Solved with `numpy.linalg.solve`. Pressure coefficient recovered as `Cp = 1 - (V/V∞)²`.
@@ -85,14 +99,11 @@ Separation is detected via adverse pressure gradient (`dCp/ds > threshold`). A b
 | Side skirts | Eliminates underbody edge vortices | Gap to ground ≥ 50mm |
 | Wheel covers | Removes rotating-wheel turbulence drag | — |
 
-### Layer 3 — WLTP Drive Cycle Integration
-F_drag(t) = ½ρv(t)²CdA
+### Layer 3 — WLTP Drive Cycle IntegrationF_drag(t) = ½ρv(t)²CdA
 P_drag(t) = F_drag(t) × v(t)
 E_aero    = ∫ P_drag dt
 E_fuel    = E_aero / η_engine    [η = 0.35 petrol]
-V_fuel    = E_fuel / E_density   [34.2 MJ/litre]
-
-### Layer 4 — Pareto Optimiser
+V_fuel    = E_fuel / E_density   [34.2 MJ/litre]### Layer 4 — Pareto Optimiser
 
 576 modification combinations evaluated. Pareto frontier extracted on two objectives: maximise fuel savings, minimise installation complexity. Output divided into three tiers.
 
@@ -150,7 +161,6 @@ road-car-aero-engine/
 ├── output/                 # Generated figures (auto-created)
 ├── main.py
 └── requirements.txt
-
 ---
 
-*Part of a physics-first computational design methodology.*
+*Part of a physics-first computational design methodology. Related project: NetFold — a 3D geometry format based on origami nets (coming soon).*
