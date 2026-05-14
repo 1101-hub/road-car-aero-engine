@@ -11,14 +11,12 @@ __pycache__/
 venv/
 .env
 env/
+.venv/
 
-# Output files (generated)
-output/*.png
-output/*.jpg
-output/*.pdf
-
-# Except the showcase image
-!output/pareto_maruti_swift.png
+# Output files — keep all pareto and validation images
+!output/pareto_*.png
+!output/validation_*.png
+!output/wltp_cycle.png
 
 # Data placeholders
 data/wltp_cycle.csv
