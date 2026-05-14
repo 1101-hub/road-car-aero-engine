@@ -490,7 +490,6 @@ def plot_pareto(car_key: str, all_solutions: List[Solution],
     ax2.legend(fontsize=9)
     ax2.grid(True, axis='y', alpha=0.3)
 
-    plt.tight_layout()
     path = save_path or f"output/pareto_{car_key}.png"
     plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
