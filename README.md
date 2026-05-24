@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue) ![Physics](https://img.shields.io/badge/method-panel%20method-green) ![No ML](https://img.shields.io/badge/ML-none-lightgrey)
 
-A physics-first computational tool that identifies which aerodynamic modifications will actually reduce a road car's fuel consumption — and by exactly how much. No machine learning. No invented data. Every number traces to a fluid physics equation or a public standard.
+A physics-first computational tool that identifies which aerodynamic modifications will actually reduce a road car's fuel consumption and by exactly how much. No machine learning. No invented data. Every number traces to a fluid physics equation or a public standard.
 
 Built for India's 330 million existing petrol and diesel vehicles that receive zero aerodynamic attention after manufacture.
 
