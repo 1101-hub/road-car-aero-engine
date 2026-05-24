@@ -34,9 +34,11 @@ Built for India's 330 million existing petrol and diesel vehicles that receive z
 Tier 1 — Minimal (bolt-on, ₹500–2000):
 Wheel covers (4 wheels)
 Saves 0.16 L/100km · ₹2,437/year · 0.66 tonnes CO₂ over 12 years
+
 Tier 2 — Moderate (DIY fabrication):
 Rear diffuser (7°, 480mm length)
 Saves 0.78 L/100km · ₹12,010/year · 3.23 tonnes CO₂ over 12 years
+
 Tier 3 — Aggressive:
 Wheel covers + rear diffuser
 Saves 0.94 L/100km · ₹14,447/year · 3.89 tonnes CO₂ over 12 years---
