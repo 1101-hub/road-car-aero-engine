@@ -171,4 +171,13 @@ road-car-aero-engine/
 └── requirements.txt
 ---
 
-*Part of a physics-first computational design methodology. Related project: NetFold — a 3D geometry format based on origami nets (coming soon).*
+## 🏎️ Layer 5 — 3D Aero Engine & NetFold Integration (New!)
+
+To bridge the gap between aerodynamic physics and actual sheet-metal manufacturing, this project now integrates a **3D Aero Engine** (`core/aero_3d.py`) that runs a 3D Source Panel Method on complex mesh geometries (like nosecones, sidepods, and wings).
+
+This 3D physics engine is designed to seamlessly pair with the **NetFold Fabrication Pipeline** (available at [1101-hub/netfold](https://github.com/1101-hub/netfold)):
+1. **Aerodynamics:** The 3D engine calculates the fluid dynamics, pressure score, and drag over the complex 3D shape.
+2. **Fabrication Penalty:** The shape is sent to the NetFold engine, which calculates the exact **Weld Length Penalty** (in meters) required to physically manufacture the aerodynamic shape from sheet metal.
+3. **Laser Cutting:** NetFold automatically unwraps the 3D shape and exports machine-ready SVG files for laser cutting, equipped with Planar Panel Fusion to avoid unnecessary scores on flat aerodynamic surfaces.
+
+This ensures that the computational solver never outputs an aerodynamically optimal design that is impossible or excessively expensive to physically build on the shop floor!
