@@ -48,6 +48,8 @@ from core.modifications import (
     ModSet
 )
 from core.wltp import compute_savings, full_pipeline, PETROL_PRICE_INR
+from core.compliance import legally_unrestricted_mods
+from core.uncertainty import delta_cd_uncertainty, confidence_of
 
 
 # ════════════════════════════════════════════════════════════════
@@ -69,6 +71,13 @@ class Solution:
     complexity_score: float            # 0–1, weighted difficulty of install
     explanation:      str              # plain-language summary
     tier:             int = 0          # assigned after Pareto analysis
+    # Honest error bars. "12,010 rupees/year" to five significant figures is
+    # how this project's original bug survived review — false precision reads
+    # as authority. Every user-facing figure now carries its uncertainty,
+    # propagated from the published ranges behind each modification model.
+    delta_Cd_unc:      float = 0.0     # absolute uncertainty on delta_Cd
+    delta_L_unc:       float = 0.0     # +/- on L/100km (mixed)
+    annual_saving_unc: float = 0.0     # +/- on rupees/year
 
 
 # ════════════════════════════════════════════════════════════════
@@ -155,13 +164,22 @@ MOD_FUNCTIONS = {
 # ════════════════════════════════════════════════════════════════
 
 def run_grid_search(car_key: str,
-                    verbose: bool = False) -> List[Solution]:
+                    verbose: bool = False,
+                    legal_only: bool = False) -> List[Solution]:
     """
     Enumerate all feasible modification combinations for a car and
     compute fuel savings for each.
 
     The grid has 2×4×3×3×2×4 = 576 combinations.
     After removing all-None and infeasible sets: ~200-400 evaluated.
+
+    Args:
+        legal_only : restrict the search to modifications with no identified
+                     statutory obstacle under the Motor Vehicles Act (i.e. those
+                     an Indian owner can fit without RTO endorsement). See
+                     core/compliance.py. This collapses the grid to wheel covers
+                     and the underbody panel — which is the honest answer, not a
+                     limitation of the search.
 
     Returns:
         List of Solution objects, one per feasible combination.
@@ -170,8 +188,16 @@ def run_grid_search(car_key: str,
     car_info   = INDIAN_CARS[car_key]
     fuel_type  = car_info.get("fuel_type", "petrol")
 
-    mod_names  = list(PARAM_GRID.keys())
-    param_opts = list(PARAM_GRID.values())
+    grid = dict(PARAM_GRID)
+    if legal_only:
+        allowed = set(legally_unrestricted_mods())
+        # Keep every modification in the grid, but allow only the "not fitted"
+        # option for anything that would need RTO approval.
+        grid = {name: (opts if name in allowed else [None])
+                for name, opts in grid.items()}
+
+    mod_names  = list(grid.keys())
+    param_opts = list(grid.values())
 
     solutions = []
     n_total   = 1
@@ -257,6 +283,11 @@ def run_grid_search(car_key: str,
             f"≈₹{s_mix.annual_cost_INR:,.0f}/year saved."
         )
 
+        # Savings are linear in delta_Cd, so the relative uncertainty on
+        # delta_Cd carries through unchanged to litres and rupees.
+        unc = delta_cd_uncertainty(ms.modifications)
+        rel = unc / ms.delta_Cd_total if ms.delta_Cd_total > 0 else 1.0
+
         sol = Solution(
             mod_list=mod_list,
             mod_names=feasible_names,
@@ -269,6 +300,9 @@ def run_grid_search(car_key: str,
             n_modifications=len(feasible_names),
             complexity_score=complexity_score(feasible_names),
             explanation=explanation,
+            delta_Cd_unc=unc,
+            delta_L_unc=s_mix.delta_L_per_100km * rel,
+            annual_saving_unc=s_mix.annual_cost_INR * rel,
         )
         solutions.append(sol)
 
@@ -519,11 +553,15 @@ def print_pareto_summary(car_key: str, reps: dict):
         print(f"\n  ── Tier {tier}: {tier_names[tier]} ──")
         print(f"  Modifications : {', '.join(sol.mod_names)}")
         print(f"  ΔCd           : -{sol.delta_Cd:.4f}  →  Cd = {sol.Cd_final:.4f}")
-        print(f"  Fuel saved    : {sol.delta_L_100km:.3f} L/100km (mixed WLTP)")
+        print(f"  Fuel saved    : {sol.delta_L_100km:.3f} ± {sol.delta_L_unc:.3f} "
+              f"L/100km (mixed WLTP)")
         print(f"  Highway saving: {sol.delta_L_highway:.3f} L/100km")
-        print(f"  Annual saving : ₹{sol.annual_saving_INR:,.0f}/year")
+        print(f"  Annual saving : ₹{sol.annual_saving_INR:,.0f} ± "
+              f"{sol.annual_saving_unc:,.0f}/year")
         print(f"  Lifetime CO₂  : {sol.lifetime_CO2_t:.2f} tonnes avoided")
         print(f"  Complexity    : {sol.complexity_score:.2f}/1.00")
+        tags = ", ".join(f"{m} [{confidence_of(m)[0]}]" for m in sol.mod_names)
+        print(f"  Confidence    : {tags}")
         print(f"  Detail        : {sol.explanation}")
 
     print(f"\n{'═'*68}\n")
@@ -535,7 +573,8 @@ def print_pareto_summary(car_key: str, reps: dict):
 
 def optimize(car_key: str,
              plot: bool = True,
-             verbose: bool = True) -> dict:
+             verbose: bool = True,
+             legal_only: bool = False) -> dict:
     """
     Full Pareto optimization for one car.
 
@@ -545,7 +584,7 @@ def optimize(car_key: str,
     if verbose:
         print(f"\n  Optimizing: {INDIAN_CARS[car_key]['display_name']}")
 
-    all_sols = run_grid_search(car_key, verbose=verbose)
+    all_sols = run_grid_search(car_key, verbose=verbose, legal_only=legal_only)
     pareto   = pareto_filter(all_sols)
     pareto   = assign_tiers(pareto)
     reps     = pick_representatives(pareto)

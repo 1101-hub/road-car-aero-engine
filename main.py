@@ -36,18 +36,26 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 
+# The banner and the physics notation use box-drawing characters and Greek
+# letters. On Windows the console defaults to cp1252, which cannot encode them,
+# and the program died with UnicodeEncodeError before printing a single line.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # ── make sure core/ is importable regardless of working directory ──
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core.panel_solver  import (validate_all, validate_indian_cars,
-                                 plot_results, solve_car, INDIAN_CARS)
+from core.panel_solver  import (validate_all, print_dalembert_report,
+                                 plot_results, solve_car, get_car_params,
+                                 INDIAN_CARS)
+from core.compliance    import check_compliance, print_compliance
 from core.modifications import (apply_mod_set, mod_underbody_panel,
                                  mod_rear_diffuser, mod_rear_spoiler,
                                  mod_front_splitter, mod_side_skirts,
                                  mod_wheel_covers, print_mod_set)
 from core.wltp          import (compute_fuel_consumption, compute_savings,
                                  print_savings, print_context_comparison,
-                                 build_wltp_cycle)
+                                 build_wltp_cycle, cycle_report)
 from core.optimizer     import (optimize, print_pareto_summary,
                                  plot_pareto, run_grid_search,
                                  pareto_filter, assign_tiers,
@@ -81,20 +89,25 @@ BANNER = """
 
 def stage_1_validate():
     """
-    Stage 1 — Validate the panel method against manufacturer Cd data.
-    Runs on all three archetypes and all Indian cars.
-    Saves validation figure to output/.
+    Stage 1 — Prove the solver is correct, then validate it against real cars.
+
+    The d'Alembert check comes FIRST and is not optional. A closed body in
+    attached potential flow must produce exactly zero drag. If it does not, the
+    panel method is broken and every Cd it reports downstream is meaningless,
+    however plausible the number looks. This check is what the original solver
+    was missing, and it is what a pair of sign errors had been hiding behind.
     """
     print("\n" + "─" * 64)
-    print("  STAGE 1 — Panel Method Validation")
+    print("  STAGE 1 — Solver correctness, then validation")
     print("─" * 64)
 
-    archetype_results = validate_all()
-    path = os.path.join(OUTPUT_DIR, "validation_archetypes.png")
-    plot_results(archetype_results, save_path=path)
+    print_dalembert_report()
+    results = validate_all()
+    cycle_report()
 
-    indian_results = validate_indian_cars()
-    return archetype_results, indian_results
+    path = os.path.join(OUTPUT_DIR, "validation_archetypes.png")
+    plot_results(results, save_path=path)
+    return results
 
 
 def stage_2_modifications(car_key: str):
@@ -145,7 +158,8 @@ def stage_3_wltp(car_key: str, Cd_modified: float, context: str = "mixed"):
     return savings
 
 
-def stage_4_optimize(car_key: str, context: str = "mixed") -> dict:
+def stage_4_optimize(car_key: str, context: str = "mixed",
+                     legal_only: bool = False) -> dict:
     """
     Stage 4 — Run the Pareto optimiser for one car.
     """
@@ -154,7 +168,7 @@ def stage_4_optimize(car_key: str, context: str = "mixed") -> dict:
           f"{INDIAN_CARS[car_key]['display_name']}")
     print("─" * 64)
 
-    all_sols = run_grid_search(car_key, verbose=True)
+    all_sols = run_grid_search(car_key, verbose=True, legal_only=legal_only)
     pareto   = pareto_filter(all_sols)
     pareto   = assign_tiers(pareto)
     reps     = pick_representatives(pareto)
@@ -212,7 +226,8 @@ def plot_wltp_cycle():
 # FULL CASE STUDY — one car, all stages, clean output
 # ════════════════════════════════════════════════════════════════
 
-def run_case_study(car_key: str, context: str = "mixed"):
+def run_case_study(car_key: str, context: str = "mixed",
+                   legal_only: bool = False):
     """
     Run the complete pipeline for one car and print a
     self-contained case study report.
@@ -230,7 +245,7 @@ def run_case_study(car_key: str, context: str = "mixed"):
     # Stages 2 → 3 → 4
     baseline, ms = stage_2_modifications(car_key)
     stage_3_wltp(car_key, ms.Cd_final, context)
-    result = stage_4_optimize(car_key, context)
+    result = stage_4_optimize(car_key, context, legal_only=legal_only)
 
     # Pick the Tier 2 (moderate) recommendation for the summary
     reps = result['reps']
@@ -241,13 +256,20 @@ def run_case_study(car_key: str, context: str = "mixed"):
     print(f"{'─'*68}")
     print(f"  Car     : {car_info['display_name']}")
     print(f"  Mods    : {', '.join(rec.mod_names)}")
-    print(f"  ΔCd     : -{rec.delta_Cd:.4f}")
-    print(f"  Savings : {rec.delta_L_100km:.3f} L/100km  "
+    print(f"  ΔCd     : -{rec.delta_Cd:.4f} ± {rec.delta_Cd_unc:.4f}")
+    print(f"  Savings : {rec.delta_L_100km:.3f} ± {rec.delta_L_unc:.3f} L/100km  "
           f"(highway: {rec.delta_L_highway:.3f} L/100km)")
-    print(f"  Annual  : ₹{rec.annual_saving_INR:,.0f}/year")
+    print(f"  Annual  : ₹{rec.annual_saving_INR:,.0f} ± "
+          f"{rec.annual_saving_unc:,.0f}/year")
     print(f"  CO₂     : {rec.lifetime_CO2_t:.2f} tonnes over 12 years")
     print(f"  Why     : {rec.explanation}")
     print(f"{'─'*68}\n")
+
+    # Stage 5 — can the owner actually fit this, legally and on Indian roads?
+    # A recommendation that ignores this is not a recommendation, it is a wish.
+    params, _ = get_car_params(car_key)
+    rep = check_compliance(car_info, params, rec.mod_names)
+    print_compliance(rep)
 
     return result
 
@@ -256,7 +278,7 @@ def run_case_study(car_key: str, context: str = "mixed"):
 # FULL RUN — all cars
 # ════════════════════════════════════════════════════════════════
 
-def run_full(context: str = "mixed"):
+def run_full(context: str = "mixed", legal_only: bool = False):
     """
     Run the complete pipeline across all Indian cars.
     This is what you run to generate everything for the portfolio.
@@ -278,7 +300,7 @@ def run_full(context: str = "mixed"):
 
     all_results = {}
     for car_key in priority_cars:
-        all_results[car_key] = run_case_study(car_key, context)
+        all_results[car_key] = run_case_study(car_key, context, legal_only)
 
     # ── Fleet summary table ───────────────────────────────────────
     print(f"\n{'═'*68}")
@@ -334,7 +356,13 @@ def main():
     )
     parser.add_argument(
         "--validate-only", action="store_true",
-        help="Run Layer 1 validation only"
+        help="Run solver correctness check and Layer 1 validation only"
+    )
+    parser.add_argument(
+        "--legal-only", action="store_true",
+        help="Only recommend modifications an Indian owner can fit WITHOUT RTO "
+             "endorsement (Motor Vehicles Act s.52). Excludes every external "
+             "body modification. See core/compliance.py."
     )
 
     args = parser.parse_args()
@@ -354,9 +382,9 @@ def main():
                   f"Run with --list to see available cars.\n")
             sys.exit(1)
         print(BANNER)
-        run_case_study(args.car, args.context)
+        run_case_study(args.car, args.context, args.legal_only)
     else:
-        run_full(args.context)
+        run_full(args.context, args.legal_only)
 
 
 if __name__ == "__main__":
