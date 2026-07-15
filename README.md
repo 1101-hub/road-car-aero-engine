@@ -1,6 +1,6 @@
 # Road Car Aerodynamic Fuel Efficiency Engine
 
-![Python](https://img.shields.io/badge/python-3.10+-blue) ![Physics](https://img.shields.io/badge/method-panel%20method-green) ![No ML](https://img.shields.io/badge/ML-none-lightgrey) ![Tests](https://img.shields.io/badge/tests-268%20passing-brightgreen)
+![Python](https://img.shields.io/badge/python-3.10+-blue) ![Physics](https://img.shields.io/badge/method-panel%20method-green) ![No ML](https://img.shields.io/badge/ML-none-lightgrey) ![Tests](https://img.shields.io/badge/tests-275%20passing-brightgreen)
 
 A physics-first tool that works out which aerodynamic modifications actually reduce a road car's fuel consumption, by how much, **within what error bars, and whether you may legally fit them**. No machine learning. No invented data. Every number traces to a fluid-dynamics equation, a measured dimension, or a public standard — and every claim the code makes is enforced by a test.
 
@@ -34,9 +34,19 @@ Numbers second, physics first — this is what the solver actually computes:
 
 Every streamline is evaluated from this repository's own panel solution — the same source strengths that produce the Cd numbers — not stock CFD footage. The hatched region is drawn honestly: past the separation point, potential flow stops being true, so the picture stops pretending and labels the wake as the zone handled by the base-pressure model. That pocket of dead air is roughly 60% of the aerodynamic fuel bill, and shrinking it is what every modification here is for.
 
-**Interactive version:** open [`web/flow_explorer.html`](web/flow_explorer.html) in any browser (no install, no server — the solver's output is embedded in the file). Live particles, four switchable cars, a hover probe reading local speed and pressure, and the drag budget updating per car. Keys: `1–4` cars, `space` pause, `A` annotations. Enable GitHub Pages on this repo (Settings → Pages → main branch, `/` root) and it gets a public URL at `https://1101-hub.github.io/road-car-aero-engine/web/flow_explorer.html`.
+**Interactive version:** open [`web/flow_explorer.html`](web/flow_explorer.html) in any browser (no install, no server — the solver's output is embedded in the file). Live particles, four switchable cars, a hover probe reading local speed and pressure, and the drag budget updating per car. Keys: `1–4` cars, `space` pause, `A` annotations.
 
 Regenerate everything with `python -m core.flowviz`.
+
+---
+
+## Get a recommendation (no install)
+
+[`web/recommend.html`](web/recommend.html) is the owner-facing product: pick one of the eight cars, get the modification set with **fuel saved (± error bars), parts cost, payback period, and the RTO verdict**, then tune the numbers to your own annual mileage, petrol price and driving mix — all recomputed live, because savings are linear in ΔCd so the physics precomputes and the page only multiplies.
+
+The site is fully static: [`index.html`](index.html) is a landing page linking the recommender and the flow explorer. **To put it on the public web:** repo Settings → Pages → deploy from branch → `main`, `/ (root)`. The site then lives at `https://1101-hub.github.io/road-car-aero-engine/` — no server, nothing to maintain.
+
+Costs are Indian aftermarket estimates ([core/costs.py](core/costs.py)) and payback is reported as a range built from the honest corners: cheapest parts against the optimistic saving, priciest parts against the pessimistic one. Regenerate the page data with `python -m core.recommend_export`.
 
 ---
 
@@ -155,7 +165,7 @@ python main.py --car tata_nexon --legal-only   # only mods needing no RTO approv
 python -m core.aero_3d               # 3D solver: sphere validation + Ahmed sweep
 python -m core.coastdown --demo      # measure CdA from a (synthetic) coastdown
 
-pytest test/ -q                      # 268 tests
+pytest test/ -q                      # 275 tests
 ```
 
 Python 3.10+. NumPy 2.0+ is required (the code uses `np.trapezoid`).
@@ -217,6 +227,7 @@ The 30° peak is produced by a pair of counter-rotating **C-pillar vortices** th
 ```
 core/
   compliance.py     # Layer 0: statutory (MVA s.52) + speed-breaker geometry
+  costs.py          # part costs (market estimates) + payback-range arithmetic
   geometry.py       # closed 2D silhouette, arc-length resampled, filleted
   panel_solver.py   # Layer 1: source panel method + drag budget
   modifications.py  # Layer 2: modification physics, budget-constrained
@@ -225,9 +236,14 @@ core/
   uncertainty.py    # error-bar propagation + per-mod confidence tags
   aero_3d.py        # Layer 5: 3D panels + ground effect + wake (see above)
   coastdown.py      # measure real CdA from a phone GPS log (SAE J2263-style)
+  flowviz.py        # flow figures, GIF, and the explorer's embedded fields
+  recommend_export.py # precomputes the recommendation page's data
+web/
+  recommend.html    # owner-facing recommendation page (static, self-contained)
+  flow_explorer.html# live particle flow around four cars
 docs/
   COASTDOWN.md      # measurement protocol, safety, error budget
-test/               # 268 tests
+test/               # 275 tests
 data/               # drop the official WLTP trace here
 output/             # generated figures
 main.py

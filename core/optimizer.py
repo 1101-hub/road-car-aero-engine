@@ -50,6 +50,7 @@ from core.modifications import (
 from core.wltp import compute_savings, full_pipeline, PETROL_PRICE_INR
 from core.compliance import legally_unrestricted_mods
 from core.uncertainty import delta_cd_uncertainty, confidence_of
+from core.costs import compute_payback, Payback
 
 
 # ════════════════════════════════════════════════════════════════
@@ -78,6 +79,11 @@ class Solution:
     delta_Cd_unc:      float = 0.0     # absolute uncertainty on delta_Cd
     delta_L_unc:       float = 0.0     # +/- on L/100km (mixed)
     annual_saving_unc: float = 0.0     # +/- on rupees/year
+    # What it costs and when it pays for itself — the number an owner actually
+    # decides with. Parts-cost ranges are market estimates (core/costs.py);
+    # payback pairs the pessimistic cost with the pessimistic saving, so a
+    # printed "pays back in 2-6 years" already contains the bad day.
+    payback:           Payback = None
 
 
 # ════════════════════════════════════════════════════════════════
@@ -303,6 +309,8 @@ def run_grid_search(car_key: str,
             delta_Cd_unc=unc,
             delta_L_unc=s_mix.delta_L_per_100km * rel,
             annual_saving_unc=s_mix.annual_cost_INR * rel,
+            payback=compute_payback(feasible_names, s_mix.annual_cost_INR,
+                                    s_mix.annual_cost_INR * rel),
         )
         solutions.append(sol)
 
@@ -562,6 +570,9 @@ def print_pareto_summary(car_key: str, reps: dict):
         print(f"  Complexity    : {sol.complexity_score:.2f}/1.00")
         tags = ", ".join(f"{m} [{confidence_of(m)[0]}]" for m in sol.mod_names)
         print(f"  Confidence    : {tags}")
+        if sol.payback:
+            print(f"  Parts cost    : {sol.payback.cost_str()}  (market estimate, DIY fit)")
+            print(f"  Pays back in  : {sol.payback.payback_str()}")
         print(f"  Detail        : {sol.explanation}")
 
     print(f"\n{'═'*68}\n")

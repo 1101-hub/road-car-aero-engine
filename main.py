@@ -262,6 +262,9 @@ def run_case_study(car_key: str, context: str = "mixed",
     print(f"  Annual  : ₹{rec.annual_saving_INR:,.0f} ± "
           f"{rec.annual_saving_unc:,.0f}/year")
     print(f"  CO₂     : {rec.lifetime_CO2_t:.2f} tonnes over 12 years")
+    if rec.payback:
+        print(f"  Cost    : {rec.payback.cost_str()}  →  pays back in "
+              f"{rec.payback.payback_str()}")
     print(f"  Why     : {rec.explanation}")
     print(f"{'─'*68}\n")
 

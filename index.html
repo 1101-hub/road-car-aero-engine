@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Road-Car Aero Engine — aerodynamics that pays for itself</title>
+<style>
+  :root{
+    --bg:#0D0A14; --panel:#14101E; --line:#2A2438;
+    --ink:#F4F1FA; --muted:#9A93AC; --faint:#6B6580;
+    --g1:#FF7A3D; --g2:#E84C8B; --g3:#8B5CF6; --data:#7FB8E8;
+    --mono:"Cascadia Code","JetBrains Mono",Consolas,monospace;
+    --sans:"Segoe UI Variable Display","Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:var(--sans);line-height:1.55}
+  body::before{content:"";position:fixed;inset:0;pointer-events:none;
+    background:
+      radial-gradient(700px 460px at 80% -10%, rgba(139,92,246,.16), transparent 70%),
+      radial-gradient(800px 520px at -15% 25%, rgba(232,76,139,.11), transparent 70%);}
+  .wrap{position:relative;max-width:1000px;margin:0 auto;padding:72px 24px 64px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.22em;
+    text-transform:uppercase;color:var(--muted)}
+  h1{font-size:clamp(34px,5.6vw,60px);font-weight:750;line-height:1.06;
+    letter-spacing:-.02em;margin:16px 0 18px;max-width:18ch;text-wrap:balance}
+  h1 .grad{background:linear-gradient(92deg,var(--g1),var(--g2) 55%,var(--g3));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .lede{color:var(--muted);max-width:60ch;font-size:17.5px}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:44px}
+  @media (max-width:720px){.cards{grid-template-columns:1fr}}
+  a.card{display:block;background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:26px 26px 22px;color:var(--ink);text-decoration:none}
+  a.card:hover{border-color:transparent;
+    background:linear-gradient(var(--panel),var(--panel)) padding-box,
+      linear-gradient(120deg,var(--g1),var(--g2),var(--g3)) border-box;
+    border:1px solid transparent}
+  a.card:focus-visible{outline:2px solid var(--g2);outline-offset:3px}
+  .card .k{font-family:var(--mono);font-size:12px;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--faint)}
+  .card h2{margin:10px 0 8px;font-size:22px;font-weight:650}
+  .card p{margin:0;color:var(--muted);font-size:14.5px}
+  .card .go{display:inline-block;margin-top:14px;font-family:var(--mono);
+    font-size:13px;color:var(--data)}
+  .honest{margin-top:44px;padding:18px 22px;border:1px solid var(--line);
+    border-radius:12px;color:var(--muted);font-size:13.5px;max-width:76ch}
+  .honest b{color:var(--ink)}
+  footer{margin-top:48px;font-family:var(--mono);font-size:12.5px;color:var(--faint);
+    display:flex;gap:20px;flex-wrap:wrap}
+  footer a{color:var(--data);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">physics-first · no ML · 275+ tests · error bars on everything</div>
+  <h1>Cut a car's fuel bill with <span class="grad">aerodynamics that actually works</span></h1>
+  <p class="lede">An open physics engine for India's existing car fleet: it computes
+  which bolt-on modifications reduce fuel consumption, what they cost, when they
+  pay back, and whether they're legal to fit — then hands you a protocol to
+  measure the result on your own car.</p>
+
+  <div class="cards">
+    <a class="card" href="web/recommend.html">
+      <span class="k">for owners</span>
+      <h2>Get your car's recommendation</h2>
+      <p>Pick from eight Indian cars. See the modification set, the rupees per
+      year with honest error bars, the parts cost, the payback period, and the
+      RTO verdict — tuned to your own mileage and fuel price.</p>
+      <span class="go">open the recommender →</span>
+    </a>
+    <a class="card" href="web/flow_explorer.html">
+      <span class="k">for the curious</span>
+      <h2>Watch the air itself</h2>
+      <p>Live particles flowing around real car shapes, computed by the same
+      solver that prices the modifications. Probe the pressure with your cursor.
+      See the wake — the pocket of dead air that is most of your fuel bill.</p>
+      <span class="go">open the flow explorer →</span>
+    </a>
+  </div>
+
+  <div class="honest"><b>The honesty contract:</b> every number traces to a
+  fluid-dynamics equation, a measured dimension, or a public standard — and
+  ships with its uncertainty. Where the physics can't see something (a 2-D
+  model pricing a hatchback and an SUV nearly the same), the tools say so on
+  screen instead of hiding it. Costs are market estimates; the legal reading is
+  flagged unverified until checked against the primary statute; and the
+  <a href="https://github.com/1101-hub/road-car-aero-engine/blob/main/docs/COASTDOWN.md"
+  style="color:var(--data)">coastdown kit</a> exists so you can catch us being wrong.</div>
+
+  <footer>
+    <a href="https://github.com/1101-hub/road-car-aero-engine">github.com/1101-hub/road-car-aero-engine</a>
+    <span>MIT licensed</span>
+  </footer>
+</div>
+</body>
+</html>
