@@ -24,6 +24,22 @@ Every figure carries an error bar propagated from the published ranges behind ea
 
 ---
 
+## See the flow
+
+Numbers second, physics first — this is what the solver actually computes:
+
+![Computed flow field around the Maruti Swift](output/flow_maruti_swift.png)
+
+![Animated particles](output/flow_maruti_swift.gif)
+
+Every streamline is evaluated from this repository's own panel solution — the same source strengths that produce the Cd numbers — not stock CFD footage. The hatched region is drawn honestly: past the separation point, potential flow stops being true, so the picture stops pretending and labels the wake as the zone handled by the base-pressure model. That pocket of dead air is roughly 60% of the aerodynamic fuel bill, and shrinking it is what every modification here is for.
+
+**Interactive version:** open [`web/flow_explorer.html`](web/flow_explorer.html) in any browser (no install, no server — the solver's output is embedded in the file). Live particles, four switchable cars, a hover probe reading local speed and pressure, and the drag budget updating per car. Keys: `1–4` cars, `space` pause, `A` annotations. Enable GitHub Pages on this repo (Settings → Pages → main branch, `/` root) and it gets a public URL at `https://1101-hub.github.io/road-car-aero-engine/web/flow_explorer.html`.
+
+Regenerate everything with `python -m core.flowviz`.
+
+---
+
 ## Correctness first
 
 The core claim of a panel method is checkable, and the check is not optional.
