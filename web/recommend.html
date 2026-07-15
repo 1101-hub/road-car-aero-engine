@@ -116,9 +116,9 @@
   <header>
     <div class="eyebrow">road-car aero engine · physics-first · error bars included</div>
     <h1>Aerodynamic modifications that <span class="grad">pay for themselves</span></h1>
-    <p class="lede">Pick your car. Get the modification set that cuts its fuel
-    bill, what the parts cost, when they pay back, and whether you can legally
-    fit them — every number computed by an
+    <p class="lede">Pick your car. We'll show you what to bolt on, where it
+    goes, what it costs, and when it starts paying you back — every number
+    computed by an
     <a href="https://github.com/1101-hub/road-car-aero-engine">open, tested physics engine</a>,
     never guessed.</p>
   </header>
@@ -166,7 +166,7 @@
   </section>
 
   <section>
-    <div class="rail"><b>02</b>the verdict</div>
+    <div class="rail"><b>02</b>what to fit</div>
     <div>
       <div class="verdict" id="verdict"></div>
       <div class="tiers" id="tiers"></div>
@@ -174,7 +174,7 @@
   </section>
 
   <section>
-    <div class="rail"><b>03</b>tune to your driving</div>
+    <div class="rail"><b>03</b>make it yours</div>
     <div class="tune">
       <div class="row">
         <label for="km">You drive per year</label>
@@ -199,24 +199,29 @@
   </section>
 
   <section>
-    <div class="rail"><b>04</b>the fine print</div>
+    <div class="rail"><b>04</b>straight talk</div>
     <div class="fine">
-      <p><b>Savings carry error bars</b> because the models behind them do:
-      each modification's effect is bounded by published wind-tunnel ranges,
-      and the drag model itself validates to about ±10% against manufacturer
-      figures. The payback range already pairs the priciest parts with the
-      most pessimistic saving.</p>
-      <p><b>Part costs are market estimates</b> (Indian aftermarket, DIY
-      fitting) — check your local prices before spending.</p>
-      <p><b>Legality is an engineering reading, not legal advice.</b> Under
-      the Motor Vehicles Act s.52, external body modifications generally need
-      RTO endorsement; wheel covers and a concealed underbody panel are the
-      two that don't. This reading is marked unverified in the source —
-      confirm with your RTO before modifying a registered vehicle.</p>
-      <p><b>Then verify it on your own car:</b> the repository includes a
+      <p><b>Why "give or take"?</b> Because honest numbers come with wiggle
+      room. Our predictions land within about 10% on cars we can check, and
+      each part's effect is only known as well as wind-tunnel tests know it.
+      When we say the money comes back "between 11 months and 5 years", the
+      slow end already assumes you paid top price and got the weak end of the
+      physics. No nasty surprises hiding in the fine print — this IS the fine
+      print.</p>
+      <p><b>About the paperwork:</b> Indian law says a registered car
+      shouldn't be altered from what's on its papers. Covers that clip onto
+      your wheels and a flat panel hidden under the floor change nothing on
+      paper — that's why they're our headline picks. Anything that changes how
+      the car looks from outside (lips, skirts, spoilers, diffusers) is where
+      the RTO gets a say. We're engineers, not lawyers: double-check with your
+      RTO before spending.</p>
+      <p><b>Prices are a shopping budget, not a quote</b> — Indian aftermarket
+      ranges, assuming you fit things yourself. Your city will differ.</p>
+      <p><b>Don't take our word for it.</b> The same project includes a
       <a href="https://github.com/1101-hub/road-car-aero-engine/blob/main/docs/COASTDOWN.md">
-      coastdown protocol</a> — measure your real drag with a phone, before and
-      after, and check us.</p>
+      simple road test</a>: coast in neutral with a phone logging GPS speed,
+      and you can measure your car's real drag — before and after the parts —
+      and catch us if we're wrong. That's the whole spirit of this tool.</p>
     </div>
   </section>
 
@@ -233,6 +238,76 @@
 if (!RECO.cars.length) return;
 
 const inr = new Intl.NumberFormat("en-IN", {maximumFractionDigits: 0});
+
+/* Plain-words description + a home on the car diagram for every part.
+   Colours follow the physics family: cyan = underbody flow, magenta/orange =
+   wake control, white = wheels. */
+const MOD_META = {
+  wheel_covers:   {c:"#E8EEF7", blurb:"smooth discs that clip onto your existing wheels",
+                   pts:[[95,92],[252,92]]},
+  underbody_panel:{c:"#1FD4E8", blurb:"a flat sheet that smooths the car's rough belly",
+                   pts:[[173,101]]},
+  front_splitter: {c:"#5FB8E8", blurb:"a low front lip that keeps air from piling underneath",
+                   pts:[[34,93]]},
+  side_skirts:    {c:"#2E8FE0", blurb:"panels along the sills that stop air leaking under the sides",
+                   pts:[[173,86]]},
+  rear_spoiler:   {c:"#FF6B3D", blurb:"a small lip on the tailgate that tidies the air letting go",
+                   pts:[[266,36]]},
+  rear_diffuser:  {c:"#C22B8A", blurb:"an angled channel that lets underbody air out gently",
+                   pts:[[268,95]]},
+};
+
+function carDiagram(activeMods){
+  const active = new Set(activeMods.map(m => m.id));
+  let dots = "";
+  for (const [id, m] of Object.entries(MOD_META)){
+    const on = active.has(id);
+    for (const [x, y] of m.pts){
+      dots += on
+        ? '<circle cx="' + x + '" cy="' + y + '" r="7" fill="' + m.c
+          + '" opacity="0.22"/>'
+          + '<circle cx="' + x + '" cy="' + y + '" r="3.4" fill="' + m.c + '"/>'
+        : '<circle cx="' + x + '" cy="' + y + '" r="2.2" fill="#3A3450"/>';
+    }
+  }
+  return '<svg viewBox="0 0 400 126" role="img" aria-label="Side view of the car showing where each part fits">'
+    + '<line x1="8" y1="112" x2="392" y2="112" stroke="#2A2438" stroke-width="2"/>'
+    + '<path d="M 34 92 L 34 74 Q 34 62 52 58 L 96 52 Q 124 30 170 27'
+    + ' L 226 27 Q 254 29 266 42 L 276 58 Q 279 62 279 70 L 279 88'
+    + ' Q 279 92 272 92 L 41 92 Q 34 92 34 92 Z"'
+    + ' fill="#171226" stroke="#4A4458" stroke-width="1.6"/>'
+    + '<circle cx="95" cy="92" r="17" fill="#0D0A14" stroke="#4A4458" stroke-width="1.6"/>'
+    + '<circle cx="252" cy="92" r="17" fill="#0D0A14" stroke="#4A4458" stroke-width="1.6"/>'
+    + '<path d="M 96 52 Q 124 32 170 29 L 224 29 Q 248 31 260 44"'
+    + ' fill="none" stroke="#2E2840" stroke-width="1.2"/>'
+    + dots + "</svg>";
+}
+
+const ICON_OK = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none">'
+  + '<circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>'
+  + '<path d="M5 8.2 7 10.2 11 5.8" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round"/></svg>';
+const ICON_DOC = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none">'
+  + '<rect x="3.2" y="1.8" width="9.6" height="12.4" rx="1.5" stroke="currentColor" stroke-width="1.4"/>'
+  + '<path d="M5.6 5.4h4.8M5.6 8h4.8M5.6 10.6h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+
+function legalPill(ok){
+  return ok
+    ? '<span class="pill good">' + ICON_OK
+      + ' You can fit these today — no paperwork, no questions</span>'
+    : '<span class="pill warn">' + ICON_DOC
+      + ' Worth doing, but talk to your RTO before fitting</span>';
+}
+
+/* a horizontal bar with the honest range drawn on it */
+function rangeBar(lo, hi, max, tickAt, underText){
+  const pl = Math.min(lo / max * 100, 100);
+  const pw = Math.max(Math.min(hi / max * 100, 100) - pl, 1.5);
+  const tick = tickAt != null
+    ? '<span class="tick" style="left:' + Math.min(tickAt / max * 100, 99) + '%"></span>' : "";
+  return '<div class="track"><span class="fill" style="left:0;width:' + pl + '%"></span>'
+    + '<span class="band" style="left:' + pl + '%;width:' + pw + '%"></span>' + tick + '</div>'
+    + (underText ? '<div class="under">' + underText + '</div>' : "");
+}
 const state = {
   car: RECO.cars[0],
   custom: null,
@@ -248,16 +323,19 @@ function money(tier){
   const unc  = c.dL100_unc / 100 * state.km * state.price;
   return {save, unc};
 }
-function paybackStr(tier, m){
+function pbRange(tier, m){
   const hiSave = m.save + m.unc, loSave = m.save - m.unc;
-  if (hiSave <= 0) return "never pays back";
-  const fmt = y => y < 1 ? Math.round(y * 12) + " mo" : y.toFixed(1) + " yr";
-  const lo = fmt(tier.cost_lo / hiSave);
-  if (loSave <= 0) return lo + " best case — may never in the worst";
-  const hi = tier.cost_hi / loSave;
-  if (hi > RECO.defaults.lifetime_yr)
-    return lo + " best case — may exceed car life in the worst";
-  return lo + " – " + fmt(hi);
+  if (hiSave <= 0) return null;
+  return {lo: tier.cost_lo / hiSave,
+          hi: loSave > 0 ? tier.cost_hi / loSave : null};
+}
+const fmtY = y => y < 1 ? Math.round(y * 12) + " months" : y.toFixed(1) + " years";
+function paybackStr(tier, m){
+  const r = pbRange(tier, m);
+  if (!r) return "won't earn its cost back";
+  if (r.hi === null || r.hi > RECO.defaults.lifetime_yr)
+    return "as soon as " + fmtY(r.lo) + " — but might not manage it at all";
+  return "between " + fmtY(r.lo) + " and " + fmtY(r.hi);
 }
 function co2(tier){
   return tier.co2_t * state.km / RECO.defaults.annual_km;
@@ -344,10 +422,14 @@ document.getElementById("cFuel").addEventListener("click", e => {
 });
 
 /* ── render verdict + tiers ── */
-function modChips(tier){
-  return '<div class="modline">' + tier.mods.map(m =>
-    '<span class="modchip" title="' + m.confidence_why.replace(/"/g,"&quot;")
-    + '">' + m.label + "<i>" + m.confidence + "</i></span>").join("") + "</div>";
+function modList(tier){
+  return '<div class="modlist">' + tier.mods.map(m => {
+    const meta = MOD_META[m.id] || {c: "#888", blurb: ""};
+    return '<div class="modrow" title="how sure we are: ' + m.confidence
+      + ' — ' + m.confidence_why.replace(/"/g, "&quot;") + '">'
+      + '<span class="dot" style="color:' + meta.c + ';background:' + meta.c + '"></span>'
+      + "<b>" + m.label + "</b><span>" + meta.blurb + "</span></div>";
+  }).join("") + "</div>";
 }
 function render(){
   [...carBox.children].forEach((b, i) =>
@@ -358,28 +440,49 @@ function render(){
   const lb = state.car.legal_best;
   const m = money(lb);
   const v = document.getElementById("verdict");
+
+  const life = RECO.defaults.lifetime_yr;
+  const pb = pbRange(lb, m);
+  const dragLo = Math.max((lb.dCd - lb.dCd_unc) / state.car.Cd * 100, 0);
+  const dragHi = (lb.dCd + lb.dCd_unc) / state.car.Cd * 100;
+  const trees = Math.max(1, Math.round(co2(lb) * 1000 / (21 * life)));
+  const breaker = state.car.belly_ok === false
+    ? '<div class="under" style="color:var(--warn)">one caution: this car sits '
+      + 'low \u2014 measure your clearance before fitting anything under the body</div>'
+    : "";
+
   v.innerHTML =
     '<div>'
-    + '<span class="badge ok">FIT AS-IS — NO RTO APPROVAL NEEDED</span>'
-    + '<div class="big-money">₹' + inr.format(Math.round(m.save)) + '/yr'
-    + ' <span class="big-unc">± ' + inr.format(Math.round(m.unc)) + '</span></div>'
-    + '<div class="cap">fuel saved on your ' + state.car.name + ", "
-    + state.ctx + " driving, " + inr.format(state.km) + " km/yr</div>"
-    + modChips(lb)
-    + '</div>'
-    + '<div>'
-    + '<div class="kv"><span>parts cost (estimate)</span><span>₹'
-      + inr.format(lb.cost_lo) + "–" + inr.format(lb.cost_hi) + "</span></div>"
-    + '<div class="kv"><span>pays for itself in</span><span>'
-      + paybackStr(lb, m) + "</span></div>"
-    + '<div class="kv"><span>drag reduction</span><span>ΔCd '
-      + lb.dCd.toFixed(3) + " ± " + lb.dCd_unc.toFixed(3) + "</span></div>"
-    + '<div class="kv"><span>CO₂ avoided over car life</span><span>'
-      + co2(lb).toFixed(2) + " t</span></div>"
-    + '<div class="kv"><span>fits over speed breakers</span><span>'
-      + (state.car.belly_ok === null ? "measure your clearance"
-         : state.car.belly_ok ? "yes" : "check clearance") + "</span></div>"
-    + '</div>';
+    + legalPill(true)
+    + '<div class="big-money">\u20b9' + inr.format(Math.round(m.save)) + '/yr'
+    + ' <span class="big-unc">give or take ' + inr.format(Math.round(m.unc)) + '</span></div>'
+    + '<div class="cap">what your ' + state.car.name + " stops burning \u2014 "
+    + state.ctx + " driving, " + inr.format(state.km) + " km a year</div>"
+    + '<div class="diagram">' + carDiagram(lb.mods) + "</div>"
+    + modList(lb)
+    + "</div>"
+    + "<div>"
+    + '<div class="stat"><div class="lab"><span>less air-drag</span><output>about '
+      + Math.round((dragLo + dragHi) / 2) + "%</output></div>"
+      + rangeBar(dragLo, dragHi, 25, null,
+                 "the pale band is our honest range") + "</div>"
+    + '<div class="stat"><div class="lab"><span>earns its money back in</span><output>'
+      + (pb ? fmtY(pb.lo) + (pb.hi ? "\u2013" + fmtY(pb.hi) : "+") : "\u2014") + "</output></div>"
+      + (pb ? rangeBar(pb.lo, pb.hi === null ? life : pb.hi, life, null,
+                       "the full bar is your car's remaining life (~" + life + " years)")
+            : "") + "</div>"
+    + '<div class="stat"><div class="lab"><span>parts, fitted by you</span><output>\u20b9'
+      + inr.format(lb.cost_lo) + "\u2013" + inr.format(lb.cost_hi) + "</output></div>"
+      + '<div class="under">local prices vary \u2014 treat this as a shopping budget</div></div>'
+    + '<div class="stat"><div class="lab"><span>cleaner air</span><output>\u2248 '
+      + trees + " trees\u2019 worth</output></div>"
+      + '<div class="under">CO\u2082 avoided over the car\u2019s life, counted as the work of '
+      + trees + " grown trees</div>" + breaker + "</div>"
+    + '<div class="under" style="margin-top:10px">for the curious: \u0394Cd '
+    + lb.dCd.toFixed(3) + " \u00b1 " + lb.dCd_unc.toFixed(3)
+    + (state.custom ? " \u00b7 custom car: extra \u00b115% already included" : "")
+    + "</div>"
+    + "</div>";
 
   const tbox = document.getElementById("tiers");
   tbox.innerHTML = "";
@@ -387,18 +490,24 @@ function render(){
     const tm = money(t);
     const el = document.createElement("div");
     el.className = "tier";
+    const dots = t.mods.map(x => {
+      const meta = MOD_META[x.id] || {c: "#888"};
+      return '<span style="display:inline-block;width:8px;height:8px;'
+        + 'border-radius:50%;margin-right:5px;background:' + meta.c
+        + ';box-shadow:0 0 6px ' + meta.c + '"></span>' + x.label;
+    }).join('<span style="color:var(--faint)"> \u00b7 </span>');
     el.innerHTML =
       "<h3>" + t.name + "</h3>"
-      + '<div class="tsub">' + t.mods.map(x => x.label).join(" + ") + "</div>"
-      + '<div class="money">₹' + inr.format(Math.round(tm.save))
-      + "<small> ± " + inr.format(Math.round(tm.unc)) + " /yr</small></div>"
-      + '<div class="kv"><span>cost</span><span>₹' + inr.format(t.cost_lo)
-      + "–" + inr.format(t.cost_hi) + "</span></div>"
-      + '<div class="kv"><span>payback</span><span>' + paybackStr(t, tm) + "</span></div>"
-      + '<div class="kv"><span>legal</span><span>'
+      + '<div class="tsub">' + dots + "</div>"
+      + '<div class="money">\u20b9' + inr.format(Math.round(tm.save))
+      + "<small> \u00b1 " + inr.format(Math.round(tm.unc)) + " a year</small></div>"
+      + '<div class="kv"><span>shopping budget</span><span>\u20b9' + inr.format(t.cost_lo)
+      + "\u2013" + inr.format(t.cost_hi) + "</span></div>"
+      + '<div class="kv"><span>money back</span><span>' + paybackStr(t, tm) + "</span></div>"
+      + '<div class="kv"><span>paperwork</span><span>'
       + (t.legal_as_is
-         ? '<span style="color:var(--ok)">fit as-is</span>'
-         : '<span style="color:var(--warn)">needs RTO approval</span>')
+         ? '<span style="color:var(--ok)">none \u2713</span>'
+         : '<span style="color:var(--warn)">RTO first</span>')
       + "</span></div>";
     tbox.appendChild(el);
   });
