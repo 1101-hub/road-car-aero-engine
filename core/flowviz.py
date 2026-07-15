@@ -99,7 +99,7 @@ def _wake_polygon(coords, meta, sep_idx, pg, x_max):
     return np.array(top + bot + tail)
 
 
-def render_flow(car_key: str = "maruti_swift", n_panels: int = 400,
+def render_flow(car_key: str = "maruti_swift", n_panels: int = 500,
                 save_png: str = None, save_gif: str = None,
                 gif_seconds: float = 4.0, verbose: bool = True):
     """Render the annotated flow field (PNG) and particle animation (GIF)."""
@@ -131,8 +131,14 @@ def render_flow(car_key: str = "maruti_swift", n_panels: int = 400,
     U_draw = np.where(in_body | in_wake, np.nan, U)
     V_draw = np.where(in_body | in_wake, np.nan, V)
 
-    x_stag = float(pg["xc"][np.argmax(result["Cp"])])
-    y_stag = float(pg["yc"][np.argmax(result["Cp"])])
+    # The stagnation marker: the global argmax of Cp can land on the windshield
+    # root (a genuine secondary stagnation region on a real car), which makes a
+    # label that says "the nose" point at the glass. Restrict to the front 25%
+    # of the body so the marker names the primary stagnation point.
+    front = np.where(pg["xc"] < 0.25)[0]
+    i_stag = int(front[np.argmax(result["Cp"][front])])
+    x_stag = float(pg["xc"][i_stag])
+    y_stag = float(pg["yc"][i_stag])
     x_sep, y_sep = float(pg["xc"][sep]), float(pg["yc"][sep])
 
     def draw_scene(ax):
@@ -177,11 +183,16 @@ def render_flow(car_key: str = "maruti_swift", n_panels: int = 400,
                     xy=(x_sep, y_sep), xytext=(1.28, 0.70),
                     fontsize=9.5, color=ACCENT, zorder=6,
                     arrowprops=dict(arrowstyle="-", color=ACCENT, lw=0.9))
-        ax.text(1.52, 0.16,
-                "THE WAKE\nlow-pressure dead air the car drags along.\n"
-                "This region is ~60% of the fuel you burn on aero.\n"
-                "(hatched = beyond potential flow — modelled at\n"
-                "base pressure, not drawn as fake streamlines)",
+        # keep the wake label clear of the colorbar on the right edge:
+        # short lines, anchored just aft of the base
+        ax.text(1.06, 0.10,
+                "THE WAKE\n"
+                "low-pressure dead air the car\n"
+                "drags along — ~60% of the fuel\n"
+                "you burn on aero.\n"
+                "(hatched = beyond potential flow;\n"
+                "modelled at base pressure, not\n"
+                "drawn as fake streamlines)",
                 fontsize=9.5, color=INK_MUTED, zorder=6)
         ax.annotate("underbody: rough channel,\nwhere panels and skirts work",
                     xy=(0.5, meta["clearance_norm"] - 0.02),
@@ -193,9 +204,9 @@ def render_flow(car_key: str = "maruti_swift", n_panels: int = 400,
             f"Cpb = {result['Cpb']:.2f})",
             fontsize=12, color=INK, pad=12)
         fig.text(0.02, 0.015,
-                 "Streamlines: this project's own 2D panel solution "
-                 "(400 source panels). Every drag number in the README "
-                 "descends from this field.",
+                 f"Streamlines: this project's own 2D panel solution "
+                 f"({n_panels} source panels). Every drag number in the "
+                 f"README descends from this field.",
                  fontsize=8, color=INK_MUTED)
         plt.tight_layout()
         fig.savefig(save_png, dpi=150, bbox_inches="tight",
