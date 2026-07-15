@@ -9,7 +9,7 @@
   :root{
     --bg:#0D0A14; --panel:#14101E; --line:#2A2438;
     --ink:#F4F1FA; --muted:#9A93AC; --faint:#6B6580;
-    --g1:#FF7A3D; --g2:#E84C8B; --g3:#8B5CF6; --data:#7FB8E8;
+    --g1:#FF6B3D; --g2:#C22B8A; --g3:#1FD4E8; --data:#7FB8E8;
     --mono:"Cascadia Code","JetBrains Mono",Consolas,monospace;
     --sans:"Segoe UI Variable Display","Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
   }
@@ -18,8 +18,8 @@
     font-family:var(--sans);line-height:1.55}
   body::before{content:"";position:fixed;inset:0;pointer-events:none;
     background:
-      radial-gradient(700px 460px at 80% -10%, rgba(139,92,246,.16), transparent 70%),
-      radial-gradient(800px 520px at -15% 25%, rgba(232,76,139,.11), transparent 70%);}
+      radial-gradient(700px 460px at 80% -10%, rgba(31,212,232,.14), transparent 70%),
+      radial-gradient(800px 520px at -15% 25%, rgba(194,43,138,.12), transparent 70%);}
   .wrap{position:relative;max-width:1000px;margin:0 auto;padding:72px 24px 64px}
   .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.22em;
     text-transform:uppercase;color:var(--muted)}
@@ -53,20 +53,29 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="eyebrow">physics-first · no ML · 275+ tests · error bars on everything</div>
+  <div class="eyebrow">physics-first · no ML · 318 tests · error bars on everything</div>
   <h1>Cut a car's fuel bill with <span class="grad">aerodynamics that actually works</span></h1>
   <p class="lede">An open physics engine for India's existing car fleet: it computes
   which bolt-on modifications reduce fuel consumption, what they cost, when they
   pay back, and whether they're legal to fit — then hands you a protocol to
   measure the result on your own car.</p>
 
+  <img src="output/banner.png" style="width:100%;border-radius:14px;
+    border:1px solid var(--line);margin-top:36px" alt="The Maruti Swift's
+    computed pressure field, rendered by this project's solver — cyan/blue
+    suction, magenta/orange pressure">
+  <p style="font-family:var(--mono);font-size:12px;color:var(--faint);
+    margin:8px 2px 0">not artwork — the Swift's actual computed pressure
+    field. cyan/blue: suction · magenta/orange: pressure</p>
+
   <div class="cards">
     <a class="card" href="web/recommend.html">
       <span class="k">for owners</span>
       <h2>Get your car's recommendation</h2>
-      <p>Pick from eight Indian cars. See the modification set, the rupees per
-      year with honest error bars, the parts cost, the payback period, and the
-      RTO verdict — tuned to your own mileage and fuel price.</p>
+      <p>Pick from ten Indian cars — or enter your own car's dimensions. See
+      the modification set, the rupees per year with honest error bars, the
+      parts cost, the payback period, and the RTO verdict — tuned to your own
+      mileage and fuel price.</p>
       <span class="go">open the recommender →</span>
     </a>
     <a class="card" href="web/flow_explorer.html">

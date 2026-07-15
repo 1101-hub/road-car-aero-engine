@@ -1,3 +1,5 @@
+![The Maruti Swift's computed pressure field — cyan/blue suction, magenta/orange pressure, rendered from this repository's own solver](output/banner.png)
+
 # Road Car Aerodynamic Fuel Efficiency Engine
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue) ![Physics](https://img.shields.io/badge/method-panel%20method-green) ![No ML](https://img.shields.io/badge/ML-none-lightgrey) ![Tests](https://img.shields.io/badge/tests-318%20passing-brightgreen)
@@ -36,7 +38,7 @@ Every streamline is evaluated from this repository's own panel solution — the 
 
 **Interactive version:** open [`web/flow_explorer.html`](web/flow_explorer.html) in any browser (no install, no server — the solver's output is embedded in the file). Live particles, four switchable cars, a hover probe reading local speed and pressure, and the drag budget updating per car. Keys: `1–4` cars, `space` pause, `A` annotations.
 
-Regenerate everything with `python -m core.flowviz`.
+Regenerate everything with `python -m core.flowviz` — including the banner above, which is not artwork: it is the Swift's computed pressure field in an iridescent palette (cyan/blue = suction, magenta/orange = pressure). The aesthetic is the data.
 
 ---
 

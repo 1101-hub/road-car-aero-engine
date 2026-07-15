@@ -432,6 +432,65 @@ def export_web(html_path: str = "web/flow_explorer.html",
     return payload
 
 
+def render_banner(car_key: str = "maruti_swift",
+                  save_path: str = "output/banner.png",
+                  n_panels: int = 500, verbose: bool = True):
+    """
+    The repository banner — and it is not decoration: it is the Swift's actual
+    computed pressure field, the same array the drag numbers come from,
+    rendered in an iridescent palette on black. Suction runs cyan-to-blue,
+    pressure runs magenta-to-orange, and the wisps are real streamlines.
+    A banner that IS the physics beats any stock artwork, and nobody else's
+    repo can have it.
+    """
+    params, car = get_car_params(car_key)
+    result = solve(params, n_panels=n_panels)
+    coords, meta, pg = result["coords"], result["meta"], result["pg"]
+    sigma, sep = result["sigma"], result["sep_idx"]
+
+    x_lo, x_hi, y_lo, y_hi = -0.85, 2.55, -0.28, 0.62
+    nx, ny = 640, 172
+    gx = np.linspace(x_lo, x_hi, nx)
+    gy = np.linspace(y_lo, y_hi, ny)
+    GX, GY = np.meshgrid(gx, gy)
+    u, v = field_velocity(pg, sigma, V_REF, GX.ravel(), GY.ravel())
+    U, V = (u / V_REF).reshape(GY.shape), (v / V_REF).reshape(GY.shape)
+    Cp = 1.0 - (U ** 2 + V ** 2)
+
+    body_path = MplPath(coords)
+    wake_poly = _wake_polygon(coords, meta, sep, pg, x_hi)
+    pts = np.column_stack([GX.ravel(), GY.ravel()])
+    in_body = body_path.contains_points(pts).reshape(GY.shape)
+    in_wake = MplPath(wake_poly).contains_points(pts).reshape(GY.shape)
+
+    # iridescent-on-black: cyan/blue suction pole, magenta/orange pressure pole
+    iri = LinearSegmentedColormap.from_list("iri", [
+        "#1FD4E8", "#2E8FE0", "#123B8C", "#0A0716",
+        "#5B1E7A", "#C22B8A", "#FF6B3D"])
+    norm = TwoSlopeNorm(vmin=-1.3, vcenter=0.0, vmax=1.0)
+    Cp_draw = np.ma.masked_where(in_body, np.where(in_wake, -0.05, Cp))
+
+    fig, ax = plt.subplots(figsize=(16, 4.0))
+    fig.patch.set_facecolor("#07060C")
+    ax.set_facecolor("#07060C")
+    ax.pcolormesh(GX, GY, Cp_draw, cmap=iri, norm=norm, shading="gouraud")
+    U_s = np.where(in_body | in_wake, np.nan, U)
+    V_s = np.where(in_body | in_wake, np.nan, V)
+    ax.streamplot(gx, gy, U_s, V_s, color="#F4F1FA", density=1.3,
+                  linewidth=0.35, arrowsize=0.0)
+    ax.fill(coords[:, 0], coords[:, 1], color="#07060C", zorder=4)
+    ax.plot(coords[:, 0], coords[:, 1], color="#4A4458", lw=1.0, zorder=5)
+    ax.set_xlim(x_lo, x_hi); ax.set_ylim(y_lo, y_hi)
+    ax.set_aspect("auto"); ax.set_xticks([]); ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    fig.subplots_adjust(0, 0, 1, 1)
+    fig.savefig(save_path, dpi=160, facecolor="#07060C")
+    plt.close(fig)
+    if verbose:
+        print(f"  banner -> {save_path}")
+
+
 if __name__ == "__main__":
     import os
     import sys
@@ -441,5 +500,6 @@ if __name__ == "__main__":
     render_flow("maruti_swift",
                 save_png="output/flow_maruti_swift.png",
                 save_gif="output/flow_maruti_swift.gif")
+    render_banner()
     if os.path.isfile("web/flow_explorer.html"):
         export_web()
