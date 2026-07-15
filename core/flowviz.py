@@ -32,13 +32,21 @@ from core.geometry import build_profile, panel_geometry
 from core.panel_solver import (get_car_params, solve, INDIAN_CARS, V_REF)
 
 
-# ── palette (single-hue ramp for speed, neutral ink for text/body) ──────────
+# ── palette ──────────────────────────────────────────────────────────────────
 INK = "#1F2430"           # body fill + primary text
 INK_MUTED = "#5A6472"     # secondary text
 WAKE_FACE = "#AAB2BD"     # neutral grey — the wake carries no "speed" meaning
-SPEED_CMAP = plt.cm.Blues # sequential, one hue, light -> dark = slow -> fast
 ACCENT = "#C2410C"        # single accent for the separation marker only
 SURFACE = "#FFFFFF"
+
+# The pressure field is a TRUE POLARITY — positive pressure pushes the panel,
+# suction pulls it, and zero is physically meaningful — so it gets a diverging
+# two-hue palette with a neutral midpoint (orange = pressure, blue = suction).
+# This is what makes the "coloured CFD look" legitimate here: every colour
+# carries a sign, unlike the rainbow maps it superficially resembles.
+from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+CP_CMAP = LinearSegmentedColormap.from_list(
+    "cp_div", ["#2F6DB3", "#7FB8E8", "#F4F2EE", "#F0A268", "#D8622B"])
 
 
 def field_velocity(pg: dict, sigma: np.ndarray, V_inf: float,
@@ -160,28 +168,43 @@ def render_flow(car_key: str = "maruti_swift", n_panels: int = 500,
         fig, ax = plt.subplots(figsize=(12.5, 6.2))
         draw_scene(ax)
 
-        strm = ax.streamplot(gx, gy, U_draw, V_draw, color=speed,
-                             cmap=SPEED_CMAP, density=1.6, linewidth=1.1,
-                             arrowsize=0.9, zorder=3)
-        cbar = fig.colorbar(strm.lines, ax=ax, shrink=0.75, pad=0.01)
-        cbar.set_label("local speed / driving speed", color=INK_MUTED, fontsize=9)
+        # pressure field: Cp = 1 - (v/V)^2, masked where the mathematics
+        # is not valid (body interior, separated wake)
+        Cp_field = 1.0 - (U ** 2 + V ** 2)
+        Cp_masked = np.ma.masked_where(in_body | in_wake, Cp_field)
+        norm = TwoSlopeNorm(vmin=-1.2, vcenter=0.0, vmax=1.0)
+        pc = ax.pcolormesh(GX, GY, Cp_masked, cmap=CP_CMAP, norm=norm,
+                           shading="gouraud", zorder=1, alpha=0.9)
+
+        # streamlines now carry DIRECTION only: colouring them by speed would
+        # re-encode the same information as the pressure field (Cp = 1 - v^2),
+        # and two ramps for one quantity is one ramp too many.
+        ax.streamplot(gx, gy, U_draw, V_draw, color="#5A6472",
+                      density=1.5, linewidth=0.7, arrowsize=0.8, zorder=3)
+
+        cbar = fig.colorbar(pc, ax=ax, shrink=0.75, pad=0.01)
+        cbar.set_label("Cp — orange: pressure (pushes) · blue: suction (pulls)",
+                       color=INK_MUTED, fontsize=9)
         cbar.ax.tick_params(labelsize=8, colors=INK_MUTED)
         cbar.outline.set_visible(False)
 
-        # annotations — each names one piece of physics in plain words
-        kw = dict(fontsize=9.5, color=INK, zorder=6,
+        # annotations — each names one piece of physics in plain words. The
+        # backing box exists because the text now sits on a coloured field.
+        box = dict(facecolor=SURFACE, alpha=0.78, edgecolor="none",
+                   boxstyle="round,pad=0.35")
+        kw = dict(fontsize=9.5, color=INK, zorder=6, bbox=box,
                   arrowprops=dict(arrowstyle="-", color=INK_MUTED, lw=0.9))
         ax.plot([x_stag], [y_stag], "o", ms=7, color=INK, mec=SURFACE,
                 mew=1.2, zorder=6)
-        ax.annotate("STAGNATION\nair hits the nose and stops —\nhighest pressure on the car",
+        ax.annotate("STAGNATION\nair hits the nose and stops —\norange = pressure pushing back",
                     xy=(x_stag, y_stag), xytext=(-0.50, 0.62), **kw)
-        ax.annotate("air SPEEDS UP over the roof\n(dark = fast = low pressure)",
+        ax.annotate("air SPEEDS UP over the roof —\nblue = suction (pulls the car up)",
                     xy=(0.45, meta["H"] + 0.06), xytext=(0.18, 0.74), **kw)
         ax.plot([x_sep], [y_sep], "o", ms=7, color=ACCENT, mec=SURFACE,
                 mew=1.2, zorder=6)
         ax.annotate("SEPARATION\nthe flow lets go of the body here\n(Stratford criterion, computed)",
                     xy=(x_sep, y_sep), xytext=(1.28, 0.70),
-                    fontsize=9.5, color=ACCENT, zorder=6,
+                    fontsize=9.5, color=ACCENT, zorder=6, bbox=box,
                     arrowprops=dict(arrowstyle="-", color=ACCENT, lw=0.9))
         # keep the wake label clear of the colorbar on the right edge:
         # short lines, anchored just aft of the base

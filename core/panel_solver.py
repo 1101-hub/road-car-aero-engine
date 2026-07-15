@@ -310,6 +310,28 @@ INDIAN_CARS: Dict[str, dict] = {
         "engine_cc": 1997, "fuel_type": "diesel", "kerb_weight_kg": 1850,
         "city_kmpl": 8.5, "highway_kmpl": 12.0,
     },
+
+    # ── added to round out India's best-seller list ──────────────────
+    # Dimensions are public spec-sheet figures. Neither maker publishes a
+    # drag coefficient, so reference_Cd is ESTIMATED from segment norms and
+    # both cars are excluded from the validation set (the tests filter on
+    # "estimated" in Cd_source): a model cannot be validated against a guess.
+    "maruti_baleno": {
+        "display_name": "Maruti Suzuki Baleno (2022)", "archetype": "hatchback",
+        "length_m": 3.990, "wheelbase_m": 2.520, "height_m": 1.500, "width_m": 1.745,
+        "frontal_area_m2": 2.09, "reference_Cd": 0.31,
+        "Cd_source": "estimated from segment (no published figure)",
+        "engine_cc": 1197, "fuel_type": "petrol", "kerb_weight_kg": 920,
+        "city_kmpl": 11.0, "highway_kmpl": 15.5,
+    },
+    "tata_punch": {
+        "display_name": "Tata Punch (2023)", "archetype": "suv",
+        "length_m": 3.827, "wheelbase_m": 2.445, "height_m": 1.615, "width_m": 1.742,
+        "frontal_area_m2": 2.28, "reference_Cd": 0.37,
+        "Cd_source": "estimated from segment (upright micro-SUV; no published figure)",
+        "engine_cc": 1199, "fuel_type": "petrol", "kerb_weight_kg": 1035,
+        "city_kmpl": 10.0, "highway_kmpl": 13.8,
+    },
 }
 
 

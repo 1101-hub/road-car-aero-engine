@@ -20,7 +20,8 @@ import json
 from core.panel_solver import solve_car, get_car_params, INDIAN_CARS
 from core.optimizer import (run_grid_search, pareto_filter, assign_tiers,
                             pick_representatives)
-from core.wltp import compute_savings, PETROL_PRICE_INR, ANNUAL_KM
+from core.wltp import (compute_savings, compute_fuel_consumption,
+                       PETROL_PRICE_INR, ANNUAL_KM)
 from core.costs import MOD_COST_INR, CAR_LIFETIME_YR
 from core.compliance import check_compliance, MOD_LEGALITY, Legality
 from core.uncertainty import confidence_of
@@ -78,9 +79,30 @@ def _tier_payload(car_key: str, sol, baseline_Cd: float) -> dict:
 
 def export_recommend(html_path: str = "web/recommend.html",
                      verbose: bool = True) -> dict:
+    # Fuel-saving slope: litres per 100 km saved, per unit of drag area
+    # (CdA, m^2) removed, per driving context and fuel type. The aero fuel
+    # burn is exactly linear in CdA, so one number per (context, fuel) is the
+    # ENTIRE model a custom car needs — the page multiplies, the physics
+    # stays here where the tests are.
+    slopes = {}
+    for ctx in ("city", "mixed", "highway"):
+        slopes[ctx] = {}
+        for fuel in ("petrol", "diesel"):
+            fr = compute_fuel_consumption(Cd=1.0, A_frontal_m2=1.0,
+                                          mass_kg=1000.0, fuel_type=fuel,
+                                          context=ctx)
+            slopes[ctx][fuel] = round(fr.L_per_100km_aero, 5)
+
     payload = dict(
         defaults=dict(annual_km=ANNUAL_KM, petrol_inr=PETROL_PRICE_INR,
                       lifetime_yr=CAR_LIFETIME_YR),
+        slopes=slopes,
+        # Custom-car mode borrows each archetype's representative: the shape
+        # (and therefore the modification deltas) comes from the archetype,
+        # only the DIMENSIONS are the user's. The page adds an extra 15%
+        # uncertainty for that borrowed shape — see the JS.
+        arch_reps=dict(hatchback="maruti_swift", sedan="honda_city",
+                       suv="tata_nexon"),
         cars=[],
     )
 

@@ -213,16 +213,20 @@ def test_separation_is_on_the_rear_of_the_car(key):
 # VALIDATION AGAINST PUBLISHED Cd
 # ════════════════════════════════════════════════════════════════
 
-@pytest.mark.parametrize("key", [k for k in ALL_CARS if k != "mahindra_scorpio_n"])
+VALIDATION_SET = [k for k in ALL_CARS
+                  if "estimat" not in INDIAN_CARS[k]["Cd_source"].lower()]
+
+
+@pytest.mark.parametrize("key", VALIDATION_SET)
 def test_cd_within_15_percent_of_published(key):
     """
     Predicted Cd within +/-15% of the manufacturer figure.
 
-    Scorpio-N is excluded, and honestly so: its 'reference' Cd of 0.42 is
-    itself an estimate from geometry (see its Cd_source), not a published
-    measurement, so it is not a validation point. It is also a body-on-frame
-    ladder-chassis SUV, the boxiest shape in the database and the furthest from
-    the archetype set.
+    Cars whose reference Cd is itself an ESTIMATE (flagged in their Cd_source
+    — Scorpio-N, Baleno, Punch) are excluded, and honestly so: a model cannot
+    be validated against a guess. They still get recommendations, because
+    modification DELTAS depend on the budget structure, not on nailing the
+    absolute baseline — but they contribute nothing to the accuracy claim.
     """
     r = solve_car(key)
     err = abs(r["Cd"] - r["Cd_reference"]) / r["Cd_reference"] * 100

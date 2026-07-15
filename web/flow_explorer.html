@@ -39,6 +39,7 @@
   .canvas-card{position:relative;background:var(--panel-2);border:1px solid var(--line);
     border-radius:10px;overflow:hidden}
   canvas{display:block;width:100%;height:auto}
+  #cv,#over{position:absolute;inset:0;width:100%;height:100%}
   .probe{position:absolute;pointer-events:none;display:none;font-family:var(--mono);
     font-size:12px;background:rgba(11,18,32,.92);border:1px solid var(--line);
     border-radius:6px;padding:6px 9px;color:var(--ink);white-space:pre;z-index:5}
@@ -91,14 +92,19 @@
 
   <div class="stage">
     <div class="canvas-card" id="canvasCard">
+      <canvas id="field" width="1280" height="640" aria-hidden="true"></canvas>
       <canvas id="cv" width="1280" height="640" aria-label="Animated particle flow around the selected car"></canvas>
+      <canvas id="over" width="1280" height="640" aria-hidden="true"></canvas>
       <div class="probe" id="probe"></div>
       <div class="paused-tag" id="pausedTag">PAUSED — SPACE to run</div>
       <div class="keys">
         <div><b>SPACE</b> run / pause</div>
         <div><b>1–4</b> switch car</div>
         <div><b>A</b> annotations</div>
+        <div><b>F</b> pressure field on / off</div>
         <div><b>hover</b> probe local speed &amp; pressure</div>
+        <div style="margin-top:4px;color:#C77B4A">orange = pressure (pushes)</div>
+        <div style="color:#6FA8DC">blue = suction (pulls)</div>
       </div>
     </div>
 
@@ -217,15 +223,61 @@ function sample(x, y, out){
 /* ── canvas ────────────────────────────────────────────────────────────── */
 const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d");
+const fcv = document.getElementById("field");
+const fctx = fcv.getContext("2d");
+const ocv = document.getElementById("over");
+const octx = ocv.getContext("2d");
 const W = cv.width, H = cv.height;
 const sx = x => (x - G.x_lo) / XSPAN * W;
 const sy = y => (1 - (y - G.y_lo) / YSPAN) * H;
 
-/* speed → colour: one blue ramp, dim = slow, bright = fast (sequential) */
-const RAMP = ["#1E3A5F","#2B569B","#3E7BC4","#5E9AD8","#7FB8E8","#A9D4F5","#D6EDFF"];
-function rampColor(t){
-  const i = Math.max(0, Math.min(RAMP.length - 1, Math.round(t * (RAMP.length - 1))));
-  return RAMP[i];
+/* Pressure is a TRUE POLARITY (push vs pull around zero), so the field gets
+   a diverging palette: orange = pressure, blue = suction, dark neutral at 0.
+   Particles are near-white so they read over BOTH hues — direction and motion
+   live in the particles, magnitude and sign live in the field. One quantity,
+   one encoding each. */
+function cpColor(cp){
+  const bg = [11, 18, 32];
+  let target, t;
+  if (cp >= 0){ target = [216, 98, 43];  t = Math.min(cp / 1.0, 1); }
+  else        { target = [86, 156, 214]; t = Math.min(-cp / 1.4, 1); }
+  t = Math.pow(t, 0.75) * 0.85;
+  return [bg[0] + (target[0] - bg[0]) * t,
+          bg[1] + (target[1] - bg[1]) * t,
+          bg[2] + (target[2] - bg[2]) * t];
+}
+let showField = true;
+function drawFieldLayer(){
+  fctx.fillStyle = "#0B1220";
+  fctx.fillRect(0, 0, W, H);
+  if (showField){
+    const off = document.createElement("canvas");
+    off.width = NX; off.height = NY;
+    const otx = off.getContext("2d");
+    const img = otx.createImageData(NX, NY);
+    const U = cfg.U, V = cfg.V, M = cfg.M;
+    for (let iy = 0; iy < NY; iy++){
+      // grid row 0 is the BOTTOM of the domain; canvas row 0 is the top
+      const src = (NY - 1 - iy) * NX;
+      for (let ix = 0; ix < NX; ix++){
+        const k = src + ix;
+        const di = (iy * NX + ix) * 4;
+        let rgb;
+        if (M[k] === 1)      rgb = [31, 36, 48];          // body — repainted above
+        else if (M[k] === 2) rgb = [24, 28, 40];          // wake — kept dark
+        else {
+          const u = U[k] / Q, v = V[k] / Q;
+          rgb = cpColor(1.0 - (u * u + v * v));
+        }
+        img.data[di] = rgb[0]; img.data[di+1] = rgb[1];
+        img.data[di+2] = rgb[2]; img.data[di+3] = 255;
+      }
+    }
+    otx.putImageData(img, 0, 0);
+    fctx.imageSmoothingEnabled = true;
+    fctx.drawImage(off, 0, 0, W, H);
+  }
+  drawWake(fctx);
 }
 
 /* ── particles ─────────────────────────────────────────────────────────── */
@@ -248,70 +300,68 @@ for (let i = 0; i < N; i++){
 document.getElementById("pCount").textContent = N.toLocaleString();
 
 /* ── static scene layers ───────────────────────────────────────────────── */
-function drawBackdrop(){
-  ctx.fillStyle = "#0B1220";
-  ctx.fillRect(0, 0, W, H);
+
+function poly(c2, path){
+  c2.beginPath();
+  c2.moveTo(sx(path[0][0]), sy(path[0][1]));
+  for (let i = 1; i < path.length; i++) c2.lineTo(sx(path[i][0]), sy(path[i][1]));
+  c2.closePath();
 }
-function poly(path){
-  ctx.beginPath();
-  ctx.moveTo(sx(path[0][0]), sy(path[0][1]));
-  for (let i = 1; i < path.length; i++) ctx.lineTo(sx(path[i][0]), sy(path[i][1]));
-  ctx.closePath();
-}
-function drawWake(){
-  poly(cfg.wake);
-  ctx.save();
-  ctx.clip();
-  ctx.fillStyle = "rgba(70,83,106,0.16)";
-  ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = "rgba(138,151,171,0.30)";
-  ctx.lineWidth = 1;
+function drawWake(c2){
+  poly(c2, cfg.wake);
+  c2.save();
+  c2.clip();
+  c2.fillStyle = "rgba(70,83,106,0.16)";
+  c2.fillRect(0, 0, W, H);
+  c2.strokeStyle = "rgba(138,151,171,0.30)";
+  c2.lineWidth = 1;
   for (let x = -H; x < W; x += 13){
-    ctx.beginPath(); ctx.moveTo(x, H); ctx.lineTo(x + H, 0); ctx.stroke();
+    c2.beginPath(); c2.moveTo(x, H); c2.lineTo(x + H, 0); c2.stroke();
   }
-  ctx.restore();
+  c2.restore();
 }
-function drawBody(){
-  poly(cfg.body);
-  ctx.fillStyle = "#1F2430";
-  ctx.fill();
-  ctx.strokeStyle = "#3A4560";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
+function drawBody(c2){
+  poly(c2, cfg.body);
+  c2.fillStyle = "#1F2430";
+  c2.fill();
+  c2.strokeStyle = "#3A4560";
+  c2.lineWidth = 1.5;
+  c2.stroke();
 }
 let showNotes = true;
 function drawNotes(){
   if (!showNotes) return;
-  ctx.font = "12px Consolas, monospace";
+  octx.font = "12px Consolas, monospace";
   /* stagnation */
-  ctx.fillStyle = "#E8EEF7";
-  ctx.beginPath();
-  ctx.arc(sx(cfg.stag[0]), sy(cfg.stag[1]), 4.5, 0, 7);
-  ctx.fill();
-  ctx.fillText("stagnation — air stops, max pressure",
-               sx(cfg.stag[0]) - 10, sy(cfg.stag[1]) - 46);
-  ctx.strokeStyle = "rgba(232,238,247,.5)";
-  ctx.beginPath();
-  ctx.moveTo(sx(cfg.stag[0]), sy(cfg.stag[1]) - 8);
-  ctx.lineTo(sx(cfg.stag[0]) - 4, sy(cfg.stag[1]) - 42);
-  ctx.stroke();
+  octx.fillStyle = "#E8EEF7";
+  octx.beginPath();
+  octx.arc(sx(cfg.stag[0]), sy(cfg.stag[1]), 4.5, 0, 7);
+  octx.fill();
+  octx.fillText("stagnation — air stops, max pressure",
+                sx(cfg.stag[0]) - 10, sy(cfg.stag[1]) - 46);
+  octx.strokeStyle = "rgba(232,238,247,.5)";
+  octx.beginPath();
+  octx.moveTo(sx(cfg.stag[0]), sy(cfg.stag[1]) - 8);
+  octx.lineTo(sx(cfg.stag[0]) - 4, sy(cfg.stag[1]) - 42);
+  octx.stroke();
   /* separation */
-  ctx.fillStyle = "#FF8A4C";
-  ctx.beginPath();
-  ctx.arc(sx(cfg.sep[0]), sy(cfg.sep[1]), 4.5, 0, 7);
-  ctx.fill();
-  ctx.fillText("separation — flow lets go",
-               sx(cfg.sep[0]) - 60, sy(cfg.sep[1]) - 22);
+  octx.fillStyle = "#FF8A4C";
+  octx.beginPath();
+  octx.arc(sx(cfg.sep[0]), sy(cfg.sep[1]), 4.5, 0, 7);
+  octx.fill();
+  octx.fillText("separation — flow lets go",
+                sx(cfg.sep[0]) - 60, sy(cfg.sep[1]) - 22);
   /* wake label */
-  ctx.fillStyle = "#8A97AB";
-  ctx.fillText("THE WAKE — dead air you pay to drag along (modelled at Cpb)",
-               sx(1.18), sy(0.62));
+  octx.fillStyle = "#AAB4C4";
+  octx.fillText("THE WAKE — dead air you pay to drag along (modelled at Cpb)",
+                sx(1.18), sy(0.62));
 }
 function redrawStatic(){
-  drawBackdrop();
-  drawWake();
-  drawBody();
+  drawFieldLayer();
+  octx.clearRect(0, 0, W, H);
+  drawBody(octx);
   drawNotes();
+  ctx.clearRect(0, 0, W, H);      // restart particle trails on a scene change
 }
 
 /* ── animation loop (trail-fade technique) ─────────────────────────────── */
@@ -326,10 +376,12 @@ redrawStatic();
 
 function frame(){
   if (running){
-    /* fade previous frame slightly -> particle trails */
-    ctx.fillStyle = "rgba(11,18,32,0.16)";
+    /* the particle layer is transparent; erase 14% of its alpha each frame
+       so trails fade out while the field layer beneath stays untouched */
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.fillStyle = "rgba(0,0,0,0.14)";
     ctx.fillRect(0, 0, W, H);
-    drawWake();
+    ctx.globalCompositeOperation = "source-over";
 
     for (let i = 0; i < N; i++){
       const m = sample(px[i], py[i], vout);
@@ -340,16 +392,14 @@ function frame(){
         continue;
       }
       const sp = Math.hypot(vout[0], vout[1]);          // v / V_inf
-      ctx.strokeStyle = rampColor(Math.min(sp / 1.6, 1));
-      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = "rgba(235,242,252," + Math.min(0.25 + sp * 0.45, 0.95) + ")";
+      ctx.lineWidth = 1.3;
       ctx.beginPath();
       ctx.moveTo(sx(px[i]), sy(py[i]));
       ctx.lineTo(sx(nx2), sy(ny2));
       ctx.stroke();
       px[i] = nx2; py[i] = ny2;
     }
-    drawBody();
-    drawNotes();
   }
   requestAnimationFrame(frame);
 }
@@ -434,6 +484,7 @@ window.addEventListener("keydown", e => {
   else if (e.key >= "1" && e.key <= String(configs.length))
     select(Number(e.key) - 1);
   else if (e.key.toLowerCase() === "a"){ showNotes = !showNotes; redrawStatic(); }
+  else if (e.key.toLowerCase() === "f"){ showField = !showField; redrawStatic(); }
 });
 })();
 </script>
