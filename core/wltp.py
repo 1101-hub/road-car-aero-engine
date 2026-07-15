@@ -42,6 +42,7 @@ Reference constants:
     CO2_diesel  = 2.68 kg/litre (IPCC emission factor)
 """
 
+import os
 import numpy as np
 from dataclasses import dataclass
 from typing import Tuple
@@ -94,32 +95,118 @@ CR = 0.013
 #   Total: 1800 seconds, 23.266 km.
 # ════════════════════════════════════════════════════════════════
 
-def build_wltp_cycle() -> Tuple[np.ndarray, np.ndarray]:
+# ════════════════════════════════════════════════════════════════
+# PUBLISHED WLTC CLASS 3b SPECIFICATION
+#   UN GTR No.15, Annex 1. These are the numbers the reconstruction below
+#   is held to. They are the ground truth, not the waypoint list.
+# ════════════════════════════════════════════════════════════════
+
+WLTC_SPEC = {
+    #  phase        t_start t_end  distance_km  v_max_kmh
+    "low":        (0,     589,   3.095,       56.5),
+    "medium":     (589,   1022,  4.756,       76.6),
+    "high":       (1022,  1477,  7.158,       97.4),
+    "extra_high": (1477,  1800,  8.254,       131.3),
+}
+WLTC_TOTAL_KM = 23.263
+
+# Path to the official 1 Hz trace. If this file is populated, it is used
+# verbatim and the reconstruction below is bypassed entirely.
+_TRACE_CSV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "data", "wltp_cycle.csv")
+
+
+def load_official_trace(path: str = _TRACE_CSV):
     """
-    Reconstruct the WLTP Class 3b speed-time profile from the
-    published UN GTR No.15 phase definitions.
+    Load the official 1 Hz WLTC trace if present.
 
-    Rather than loading a CSV (which requires a download), we
-    reconstruct the cycle analytically from the official phase
-    waypoints published in GTR No.15 Annex 1, Table A1/1.
+    Expected format: two columns, `time_s,speed_kmh`, 1800 rows, with or
+    without a header. Download from the UNECE WLTP repository and drop it in
+    data/wltp_cycle.csv — the whole pipeline will pick it up automatically and
+    the reconstruction error disappears.
 
-    The cycle has four phases, each defined by a sequence of
-    (time, speed_kmh) waypoints with linear interpolation between.
-    This is exactly how the official GTR defines it.
+    Returns (t_s, v_ms) or None if the file is missing or empty.
+    """
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return None
+    try:
+        raw = np.genfromtxt(path, delimiter=",", skip_header=0)
+        if raw.ndim != 2 or raw.shape[0] < 100:
+            return None
+        if np.isnan(raw[0]).any():                 # header row present
+            raw = raw[1:]
+        t_s = raw[:, 0].astype(float)
+        v_ms = raw[:, 1].astype(float) / 3.6       # km/h -> m/s
+        return t_s, v_ms
+    except Exception:
+        return None
+
+
+def _shape_exponent(v_phase: np.ndarray, v_max: float,
+                    target_km: float, tol: float = 1e-4) -> float:
+    """
+    Find p such that reshaping v -> v_max * (v/v_max)**p makes the phase cover
+    its published distance.
+
+    Why a shape exponent and not a scale factor: scaling every speed by a
+    constant would fix the distance but destroy the phase's peak speed, and
+    aerodynamic power goes as v^3, so the peak is exactly what must be
+    preserved. This transform is a fixed point at v = 0 and at v = v_max, so
+    idle stays idle and the peak stays the peak. Only the mid-range is bent,
+    which is where the hand-typed waypoint list is actually wrong.
+
+    p > 1 pulls mid-range speeds down (shorter distance); p < 1 pushes them up.
+    """
+    if v_max <= 0:
+        return 1.0
+    u = np.clip(v_phase / v_max, 0.0, 1.0)
+
+    def dist_km(p):
+        return float(np.trapezoid(v_max * u ** p, dx=1.0)) / 1000.0
+
+    lo, hi = 0.2, 5.0
+    if dist_km(hi) > target_km or dist_km(lo) < target_km:
+        return 1.0                                  # target unreachable; leave as-is
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if dist_km(mid) > target_km:
+            lo = mid                                # need larger p to shrink further
+        else:
+            hi = mid
+        if abs(hi - lo) < tol:
+            break
+    return 0.5 * (lo + hi)
+
+
+def build_wltp_cycle(calibrate: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Return the WLTC Class 3b speed-time profile at 1 Hz.
+
+    Resolution order:
+      1. The official 1 Hz trace from data/wltp_cycle.csv, if provided.
+      2. Otherwise the waypoint reconstruction below, calibrated per phase so
+         that each phase covers its PUBLISHED distance and retains its
+         PUBLISHED peak speed.
+
+    Honesty note. The raw waypoint list is a hand-entered approximation of the
+    official trace and it is not accurate: uncalibrated it covers 28.4 km
+    against a 23.26 km specification, a 22% overshoot, because it lacks much of
+    the cycle's low-speed and idle content. Fuel consumption per 100 km is
+    proportional to the ratio of integral(v^3) to integral(v), so that error
+    does NOT cancel between baseline and modified — it inflates absolute
+    L/100km and every rupee figure downstream. The per-phase calibration below
+    removes the distance error. For publication-grade absolute numbers, supply
+    the official trace; call cycle_report() to see exactly where you stand.
 
     Returns:
-        t_s   : time array, shape (1800,), in seconds
-        v_ms  : velocity array, shape (1800,), in m/s
+        t_s  : time, seconds, shape (1800,)
+        v_ms : speed, m/s,   shape (1800,)
     """
+    official = load_official_trace()
+    if official is not None:
+        return official
 
-    # Official WLTP Class 3b phase waypoints (time_s, speed_kmh)
-    # Source: UNECE GTR No.15, Annex 1 — simplified to key inflection points
-    # Full 1Hz trace available at: https://unece.org/transport/wltp
-    #
-    # This reconstruction captures the phase structure and speed envelope
-    # accurately. Minor interpolation differences vs the 1Hz official trace
-    # affect integrated distance by < 0.3% — within acceptable tolerance.
-
+    # Waypoint reconstruction (time_s, speed_kmh), linear interpolation between.
     waypoints = [
         # ── LOW phase (urban, 0–589s) ─────────────────────────────
         (0,    0),
@@ -292,12 +379,72 @@ def build_wltp_cycle() -> Tuple[np.ndarray, np.ndarray]:
     ]
 
     t_way = np.array([w[0] for w in waypoints], dtype=float)
-    v_way = np.array([w[1] for w in waypoints], dtype=float) / 3.6  # km/h → m/s
+    v_way = np.array([w[1] for w in waypoints], dtype=float) / 3.6  # km/h -> m/s
 
-    t_s  = np.arange(0, 1800, dtype=float)
+    t_s = np.arange(0, 1800, dtype=float)
     v_ms = np.interp(t_s, t_way, v_way)
 
-    return t_s, v_ms
+    if not calibrate:
+        return t_s, v_ms
+
+    # --- Per-phase calibration to the published distances -------------------
+    v_cal = v_ms.copy()
+    for _name, (t0, t1, dist_km, vmax_kmh) in WLTC_SPEC.items():
+        mask = (t_s >= t0) & (t_s < t1)
+        v_phase = v_ms[mask]
+        if v_phase.size == 0 or v_phase.max() <= 0:
+            continue
+        v_max = vmax_kmh / 3.6
+        p = _shape_exponent(v_phase, v_max, dist_km)
+        v_cal[mask] = v_max * np.clip(v_phase / v_max, 0.0, 1.0) ** p
+
+    return t_s, v_cal
+
+
+def cycle_report(verbose: bool = True) -> dict:
+    """
+    Compare the cycle actually in use against the published WLTC 3b spec.
+
+    This exists so the reconstruction error is always visible rather than
+    buried. Call it before quoting any absolute fuel figure.
+    """
+    t_s, v_ms = build_wltp_cycle()
+    using_official = load_official_trace() is not None
+
+    rows = {}
+    if verbose:
+        src = "official 1 Hz trace" if using_official else "calibrated reconstruction"
+        print(f"\n  WLTC Class 3b — source: {src}")
+        print(f"  {'phase':<12} {'dist km':>8} {'spec':>8} {'err':>7} "
+              f"{'v_max':>7} {'spec':>7}")
+        print("  " + "-" * 52)
+
+    total = 0.0
+    for name, (t0, t1, dist_spec, vmax_spec) in WLTC_SPEC.items():
+        mask = (t_s >= t0) & (t_s < t1)
+        v = v_ms[mask]
+        dist = float(np.trapezoid(v, dx=1.0)) / 1000.0
+        vmax = float(v.max() * 3.6)
+        total += dist
+        err = (dist - dist_spec) / dist_spec * 100.0
+        rows[name] = dict(distance_km=dist, distance_spec=dist_spec,
+                          error_pct=err, v_max_kmh=vmax, v_max_spec=vmax_spec)
+        if verbose:
+            print(f"  {name:<12} {dist:8.3f} {dist_spec:8.3f} {err:+6.1f}% "
+                  f"{vmax:7.1f} {vmax_spec:7.1f}")
+
+    err_tot = (total - WLTC_TOTAL_KM) / WLTC_TOTAL_KM * 100.0
+    rows["total"] = dict(distance_km=total, distance_spec=WLTC_TOTAL_KM,
+                         error_pct=err_tot)
+    if verbose:
+        print("  " + "-" * 52)
+        print(f"  {'TOTAL':<12} {total:8.3f} {WLTC_TOTAL_KM:8.3f} {err_tot:+6.1f}%")
+        if not using_official:
+            print("  Note: drop the official 1 Hz trace into data/wltp_cycle.csv")
+            print("        to remove the remaining reconstruction error.\n")
+        else:
+            print()
+    return rows
 
 
 # Phase boundaries (seconds) — used for urban/highway subsetting

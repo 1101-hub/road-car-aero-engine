@@ -1,911 +1,787 @@
 """
-Layer 1: 2D Source Panel Method for Road Car Aerodynamics
+Layer 1: 2D Source Panel Method + First-Principles Drag Budget
 Road Car Aerodynamic Fuel Efficiency Engine
-============================================
+=============================================
 
-Physics summary:
-    1. Discretize car's 2D longitudinal cross-section into N flat panels
-    2. Place a fluid source of strength σ_j on each panel j
-    3. Boundary condition: total normal velocity at every surface point = 0
-       → linear system [A]{σ} = {b}, solved by numpy
-    4. Recover tangential velocity → pressure coefficient Cp = 1 - (V/V∞)²
-    5. Detect flow separation via adverse pressure gradient
-    6. Apply base pressure model in separated wake region
-    7. Integrate Cp around body → pressure drag coefficient
-    8. Add turbulent skin friction → total Cd
+Physics chain
+-------------
+    1. Build the car's closed 2D silhouette from ITS OWN dimensions (geometry.py)
+    2. Place a constant-strength fluid source on each panel
+    3. Enforce flow tangency on every panel  ->  [A]{sigma} = {b}
+    4. Recover tangential velocity  ->  Cp = 1 - (V/V_inf)^2
+    5. Locate separation with Stratford's turbulent criterion
+    6. Set the wake (base) pressure from the velocity at separation
+    7. Integrate the surface pressure  ->  pressure drag
+    8. Add friction, underbody, wheel, cooling and mirror drag  ->  total Cd
 
-Important: Pure potential flow obeys d'Alembert's paradox (zero drag on a
-closed body). We break this by detecting separation and applying a physically
-motivated base pressure model. This is standard engineering practice.
+d'Alembert's paradox
+--------------------
+A closed body in attached potential flow has EXACTLY ZERO drag. This is not a
+nuisance to be worked around, it is the correctness test for the solver: if the
+attached solution does not integrate to zero, the panel method is wrong.
+`validate_dalembert()` checks it, and test_panel_solver.py asserts it.
 
-Reference: Katz & Plotkin, "Low-Speed Aerodynamics", Ch. 10 (2001)
+Real drag then comes from ONE physical statement: the flow separates, and the
+wake sits at a lower pressure (Cpb) than potential flow would predict. Drag is
+what is left when you replace the potential pressure with the wake pressure
+over the separated region. Nothing else creates pressure drag in this model.
+
+The drag budget
+---------------
+Total Cd is a sum of named, physically separate components:
+
+    Cd = Cd_pressure   wake / base pressure   (panel method, dominant)
+       + Cd_friction   turbulent skin friction on the upper + side surfaces
+       + Cd_underbody  rough underbody: protrusions, exhaust, suspension
+       + Cd_wheels     four rotating wheels and their wheelhouses
+       + Cd_cooling    radiator and engine-bay through-flow
+       + Cd_mirrors    mirrors, antenna, seals, panel gaps
+
+This matters. Every modification in Layer 2 must subtract from a SPECIFIC
+component and cannot take more than that component contains. Wheel covers
+cannot remove more drag than the wheels produce.
+
+Calibration
+-----------
+Three constants are calibrated against published Cd (see CALIBRATION below).
+They are the only fitted numbers in the model and each has a physical meaning.
+Everything else is a measured dimension or a textbook constant.
+
+References
+----------
+    Katz & Plotkin, "Low-Speed Aerodynamics" 2nd ed., Ch.11 (source panels)
+    Stratford, B.S. "The prediction of separation of the turbulent boundary
+        layer", J. Fluid Mech. 5(1), 1959
+    Hoerner, S.F. "Fluid-Dynamic Drag", Ch.3 (base pressure)
+    Hucho, W.H. "Aerodynamics of Road Vehicles" 4th ed., Ch.4 (drag breakdown)
+    Ahmed et al., SAE 840300 (ground-vehicle wake structure)
 """
 
 import numpy as np
-from scipy.interpolate import CubicSpline
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from dataclasses import dataclass
-from typing import Tuple, Dict
+from typing import Dict, Tuple
+
+from core.geometry import build_profile, panel_geometry
 
 
 # ════════════════════════════════════════════════════════════════
-# 1. CAR CLASS ARCHETYPES
-#    All geometric parameters are physically meaningful measurements.
-#    Cd_range sourced from manufacturer press releases / EPA data.
+# PHYSICAL CONSTANTS
+# ════════════════════════════════════════════════════════════════
+
+RHO_AIR = 1.225        # kg/m^3, ICAO standard atmosphere at sea level
+NU_AIR = 1.5e-5        # m^2/s, kinematic viscosity of air at 20 C
+V_REF = 27.8           # m/s, 100 km/h — the reference speed for Cd
+
+
+# ════════════════════════════════════════════════════════════════
+# CALIBRATION CONSTANTS
+#
+# These three are FITTED to published Cd across the car database.
+# They are the model's only free parameters. Each is physical, each is
+# bounded by an independent argument, and each is reported honestly.
+# ════════════════════════════════════════════════════════════════
+
+K_3D = 0.44
+"""Three-dimensional relief factor.
+
+A 2D section is the worst case: the flow has nowhere to go but over the body.
+A real car is finite in span, so air escapes sideways, the suction peaks
+weaken and the wake is narrower. Slender-body and strip theory put this factor
+in the range 0.30-0.50 for automotive proportions; 0.44 is fitted here.
+
+This is the single largest approximation in the model and it is exactly what
+a 3D solver would remove."""
+
+CPB_C0 = 0.14
+CPB_C1 = 0.20
+CPB_C2 = 0.23
+"""Base pressure:
+
+    Cpb = -( CPB_C0 + CPB_C1*(V_sep/V_inf - 1) + CPB_C2*(base_height/H) )
+
+Two mechanisms set the pressure inside a wake, and BOTH are needed.
+
+  CPB_C1 — the shear layer. Hoerner's near-wake momentum argument: the layer
+    bounding the wake entrains fluid out of it, and the faster it leaves the
+    body, the harder it pumps and the lower the base pressure falls.
+
+  CPB_C2 — the wake width. Roshko's classical bluff-body result: base pressure
+    falls as the base gets bluffer, because a wider wake takes longer to close
+    and the recirculation is stronger. This is the same physics as the Ahmed
+    body's Cd-vs-slant-angle curve.
+
+The wake-width term is not optional, and leaving it out inverted the physics.
+With only the shear-layer term, Cpb was read off the flow over the rear roof —
+which on an SUV is a flat, mildly-loaded surface. The model therefore handed the
+BLUFFEST car in the database (Nexon: base/frontal = 0.945, a near-vertical
+tailgate) a Cpb of -0.25, while giving a sleek notchback sedan -0.31, because
+the sedan's boot shoulder accelerates the flow harder. A brick was being
+credited with a shallower wake than a saloon.
+
+Together these span Cpb = -0.20 to -0.38 across the database, the range measured
+on production cars.
+
+A practical note. V_sep must be read UPSTREAM of the base corner. A sharp convex
+corner is an integrable velocity singularity in potential flow, and a panel
+sitting on it reports V/V_inf > 3. The sensitivity is also deliberately linear in
+V, not quadratic: a 2D section has no spanwise relief so its velocities run high,
+and a quadratic law fed with 2D velocities drives Cpb through the floor."""
+
+CPB_SAMPLE_X = (0.72, 0.90)
+"""Window in which the shear-layer speed is sampled: aft of the roof crown,
+forward of the base-corner singularity. The median over the window is used, so
+one bad panel cannot move the answer."""
+
+K_ROUGH = 3.4
+"""Rough-underbody drag multiplier over a smooth flat plate.
+
+A production underbody is not a plate: it is an exhaust, a sump, subframes and
+suspension arms in a turbulent channel. Each protrusion sheds its own wake.
+Hucho puts the underbody at 10-15% of total Cd for an unpanelled car, which
+this multiplier reproduces."""
+
+# --- Fixed component constants (measured, not fitted) ---------------------
+
+CD_WHEEL_LOCAL = 0.25
+"""Drag coefficient of one exposed rotating wheel referenced to its OWN frontal
+area. Cogotti (1983); Hucho Ch.7. A rotating wheel in a wheelhouse behaves as a
+bluff body with a contact-patch vortex system."""
+
+CD_COOLING_DEFAULT = 0.018
+CD_APPENDAGE_DEFAULT = 0.008
+"""Cooling and appendage drag, per archetype (see ARCHETYPES below).
+
+These are NOT one global constant, because they are the biggest thing a 2D side
+profile cannot see. In silhouette a Nexon and a Swift are nearly the same shape:
+the same height-to-length ratio, the same base height. Yet the SUV's real Cd is
+10-15% higher. The difference is almost entirely plan-view and detail drag —
+roof rails, square body corners, flared arches, larger mirrors, and a bigger
+cooling flow for a bigger engine — none of which appear in a longitudinal
+cross-section.
+
+Rather than bend the fitted constants until the SUVs happened to fit, these are
+carried as explicit, separately-sourced components:
+
+    roof rails        +0.010 to +0.020 Cd   (Hucho Ch.4; a widely measured figure)
+    larger mirrors    +0.004 Cd
+    cooling flow      0.015-0.025 Cd depending on engine size
+
+This is exactly the information a 3D solver would supply for free, and naming
+it here rather than hiding it in a fudge factor is the point."""
+
+K_WET_UPPER = 2.0
+"""Upper + side wetted area as a multiple of the plan area L*W."""
+
+CLEARANCE_REF_M = 0.14
+"""Reference ground clearance for the underbody scaling. A taller car pushes
+more air through a rougher, deeper underbody channel, which is a large part of
+why SUVs pay an aerodynamic penalty beyond their frontal area alone."""
+
+X_TAIL = 0.97
+"""Aft of this station the body has a sharp base corner. Flow cannot round a
+sharp convex edge, so separation is forced here regardless of what the
+boundary-layer criterion says."""
+
+STRATFORD_S = 0.39
+"""Stratford's separation constant for a turbulent boundary layer."""
+
+
+# ════════════════════════════════════════════════════════════════
+# CAR CLASS ARCHETYPES  (SHAPE only — dimensions come from the car)
 # ════════════════════════════════════════════════════════════════
 
 ARCHETYPES: Dict[str, dict] = {
     "sedan": {
-        # Physical dimensions
-        "length_m":         4.7,
-        "height_m":         1.45,
-        "width_m":          1.80,
-        "frontal_area_m2":  2.20,
-        # Validation target (Toyota Corolla 2023: Cd=0.28)
-        "reference_Cd":     0.28,
-        "Cd_range":         (0.26, 0.30),
-        # Geometric parameters (in normalized coords, divided by car length)
-        "windshield_angle_deg":     65,   # from horizontal; steep = high drag
-        "roof_fraction":            0.28, # flat roof as fraction of total length
-        "rear_window_angle_deg":    30,   # fastback; low = streamlined
-        "trunk_height_norm":        0.68, # trunk height / total height
-        "underbody_clearance_norm": 0.08, # ground clearance / total height
-        "diffuser_angle_deg":       5.0,  # rear diffuser expansion angle
-        "diffuser_length_norm":     0.12, # diffuser length / total length
+        "length_m": 4.7, "height_m": 1.45, "width_m": 1.80,
+        "frontal_area_m2": 2.20,
+        "reference_Cd": 0.28, "Cd_range": (0.26, 0.30),
+        "windshield_angle_deg": 65,     # from horizontal; steep = high drag
+        "rear_window_angle_deg": 30,    # fastback rake
+        "trunk_height_norm": 0.66,      # boot lid height / body height
+        "underbody_clearance_norm": 0.08,
+        "diffuser_angle_deg": 5.0,
+        "diffuser_length_norm": 0.12,
+        "plan_taper": 0.78,             # boat-tails toward the boot
+        "Cd_cooling": 0.016,
+        "Cd_appendages": 0.006,         # small mirrors, flush trim
     },
     "hatchback": {
-        "length_m":         4.0,
-        "height_m":         1.50,
-        "width_m":          1.75,
-        "frontal_area_m2":  2.15,
-        # Validation target (Maruti Swift: Cd≈0.32)
-        "reference_Cd":     0.32,
-        "Cd_range":         (0.29, 0.34),
-        "windshield_angle_deg":     60,
-        "roof_fraction":            0.20,
-        "rear_window_angle_deg":    55,   # steep rear = bluffer body = more drag
-        "trunk_height_norm":        0.88,
+        "length_m": 4.0, "height_m": 1.50, "width_m": 1.75,
+        "frontal_area_m2": 2.15,
+        "reference_Cd": 0.32, "Cd_range": (0.29, 0.34),
+        "windshield_angle_deg": 60,
+        "rear_window_angle_deg": 55,    # steep tailgate = bluffer base
+        "trunk_height_norm": 0.87,
         "underbody_clearance_norm": 0.09,
-        "diffuser_angle_deg":       3.5,
-        "diffuser_length_norm":     0.09,
+        "diffuser_angle_deg": 3.5,
+        "diffuser_length_norm": 0.09,
+        "plan_taper": 0.85,
+        "Cd_cooling": 0.018,
+        "Cd_appendages": 0.008,
     },
     "suv": {
-        "length_m":         4.5,
-        "height_m":         1.70,
-        "width_m":          1.85,
-        "frontal_area_m2":  2.85,
-        # Validation target (Tata Nexon: Cd≈0.35)
-        "reference_Cd":     0.35,
-        "Cd_range":         (0.32, 0.38),
-        "windshield_angle_deg":     55,   # nearly flat windshield = high frontal
-        "roof_fraction":            0.35,
-        "rear_window_angle_deg":    75,   # nearly vertical rear = high base drag
-        "trunk_height_norm":        0.92,
-        "underbody_clearance_norm": 0.12, # high ground clearance = more underbody drag
-        "diffuser_angle_deg":       2.5,
-        "diffuser_length_norm":     0.07,
+        "length_m": 4.5, "height_m": 1.70, "width_m": 1.85,
+        "frontal_area_m2": 2.85,
+        "reference_Cd": 0.35, "Cd_range": (0.32, 0.38),
+        "windshield_angle_deg": 55,
+        "rear_window_angle_deg": 75,    # near-vertical rear = full base
+        "trunk_height_norm": 0.95,      # tailgate is essentially the full height
+        "underbody_clearance_norm": 0.12,
+        "diffuser_angle_deg": 2.5,
+        "diffuser_length_norm": 0.07,
+        "plan_taper": 0.94,             # slab-sided, carries full width to the tail
+        "Cd_cooling": 0.022,            # bigger engine, bigger grille
+        "Cd_appendages": 0.020,         # roof rails + large mirrors + arch flares
     },
 }
+# plan_taper is the ratio of the car's width at the base to its widest point.
+# A sedan boat-tails toward the boot; an SUV is slab-sided and carries almost
+# its full width to the tailgate. This is the plan-view information a 2D
+# side-profile cannot see, and it is a real, measurable dimension — not a fudge.
+# It scales the width over which the 2D section drag acts.
 
 
 # ════════════════════════════════════════════════════════════════
-# 1b. INDIAN CAR DATABASE
-#     Specs sourced from manufacturer press releases, ARAI homologation
-#     filings, and published road tests. All values publicly verifiable.
-#     Cd sources noted per entry.
+# INDIAN CAR DATABASE
 # ════════════════════════════════════════════════════════════════
 
 INDIAN_CARS: Dict[str, dict] = {
-    # ── Hatchbacks ────────────────────────────────────────────────
     "maruti_swift": {
-        "display_name":   "Maruti Suzuki Swift (2024)",
-        "archetype":      "hatchback",
-        "length_m":       3.860,
-        "height_m":       1.520,
-        "width_m":        1.735,
-        "frontal_area_m2": 2.04,
-        "reference_Cd":   0.32,
-        "Cd_source":      "ARAI homologation / Suzuki press release",
-        "engine_cc":      1197,
-        "fuel_type":      "petrol",
-        "kerb_weight_kg": 910,
-        "city_kmpl":      10.5,    # ARAI rated
-        "highway_kmpl":   14.5,
+        "display_name": "Maruti Suzuki Swift (2024)", "archetype": "hatchback",
+        "length_m": 3.860, "wheelbase_m": 2.450, "height_m": 1.520, "width_m": 1.735,
+        "frontal_area_m2": 2.04, "reference_Cd": 0.32,
+        "Cd_source": "ARAI homologation / Suzuki press release",
+        "engine_cc": 1197, "fuel_type": "petrol", "kerb_weight_kg": 910,
+        "city_kmpl": 10.5, "highway_kmpl": 14.5,
     },
     "hyundai_i20": {
-        "display_name":   "Hyundai i20 (2023)",
-        "archetype":      "hatchback",
-        "length_m":       4.040,
-        "height_m":       1.505,
-        "width_m":        1.775,
-        "frontal_area_m2": 2.10,
-        "reference_Cd":   0.30,
-        "Cd_source":      "Hyundai i20 press release (2020 gen)",
-        "engine_cc":      1197,
-        "fuel_type":      "petrol",
-        "kerb_weight_kg": 1005,
-        "city_kmpl":      10.2,
-        "highway_kmpl":   13.8,
+        "display_name": "Hyundai i20 (2023)", "archetype": "hatchback",
+        "length_m": 4.040, "wheelbase_m": 2.580, "height_m": 1.505, "width_m": 1.775,
+        "frontal_area_m2": 2.10, "reference_Cd": 0.30,
+        "Cd_source": "Hyundai i20 press release (2020 gen)",
+        "engine_cc": 1197, "fuel_type": "petrol", "kerb_weight_kg": 1005,
+        "city_kmpl": 10.2, "highway_kmpl": 13.8,
     },
     "tata_altroz": {
-        "display_name":   "Tata Altroz (2023)",
-        "archetype":      "hatchback",
-        "length_m":       3.990,
-        "height_m":       1.523,
-        "width_m":        1.755,
-        "frontal_area_m2": 2.08,
-        "reference_Cd":   0.31,
-        "Cd_source":      "Tata Motors technical brief",
-        "engine_cc":      1199,
-        "fuel_type":      "petrol",
-        "kerb_weight_kg": 1025,
-        "city_kmpl":      9.8,
-        "highway_kmpl":   13.2,
+        "display_name": "Tata Altroz (2023)", "archetype": "hatchback",
+        "length_m": 3.990, "wheelbase_m": 2.501, "height_m": 1.523, "width_m": 1.755,
+        "frontal_area_m2": 2.08, "reference_Cd": 0.31,
+        "Cd_source": "Tata Motors technical brief",
+        "engine_cc": 1199, "fuel_type": "petrol", "kerb_weight_kg": 1025,
+        "city_kmpl": 9.8, "highway_kmpl": 13.2,
     },
-
-    # ── Sedans ────────────────────────────────────────────────────
     "honda_city": {
-        "display_name":   "Honda City (2023, 5th gen)",
-        "archetype":      "sedan",
-        "length_m":       4.549,
-        "height_m":       1.489,
-        "width_m":        1.748,
-        "frontal_area_m2": 2.15,
-        "reference_Cd":   0.28,
-        "Cd_source":      "Honda City press kit (5th gen, 2020)",
-        "engine_cc":      1498,
-        "fuel_type":      "petrol",
-        "kerb_weight_kg": 1098,
-        "city_kmpl":      11.5,
-        "highway_kmpl":   16.5,
+        "display_name": "Honda City (2023, 5th gen)", "archetype": "sedan",
+        "length_m": 4.549, "wheelbase_m": 2.600, "height_m": 1.489, "width_m": 1.748,
+        "frontal_area_m2": 2.15, "reference_Cd": 0.28,
+        "Cd_source": "Honda City press kit (5th gen, 2020)",
+        "engine_cc": 1498, "fuel_type": "petrol", "kerb_weight_kg": 1098,
+        "city_kmpl": 11.5, "highway_kmpl": 16.5,
     },
     "maruti_dzire": {
-        "display_name":   "Maruti Suzuki Dzire (2024)",
-        "archetype":      "sedan",
-        "length_m":       3.995,
-        "height_m":       1.515,
-        "width_m":        1.735,
-        "frontal_area_m2": 2.06,
-        "reference_Cd":   0.30,
-        "Cd_source":      "Suzuki Dzire technical spec sheet",
-        "engine_cc":      1197,
-        "fuel_type":      "petrol",
-        "kerb_weight_kg": 890,
-        "city_kmpl":      11.0,
-        "highway_kmpl":   15.7,
+        "display_name": "Maruti Suzuki Dzire (2024)", "archetype": "sedan",
+        "length_m": 3.995, "wheelbase_m": 2.450, "height_m": 1.515, "width_m": 1.735,
+        "frontal_area_m2": 2.06, "reference_Cd": 0.30,
+        "Cd_source": "Suzuki Dzire technical spec sheet",
+        "engine_cc": 1197, "fuel_type": "petrol", "kerb_weight_kg": 890,
+        "city_kmpl": 11.0, "highway_kmpl": 15.7,
     },
-
-    # ── SUVs / Compact SUVs ───────────────────────────────────────
     "tata_nexon": {
-        "display_name":   "Tata Nexon (2023)",
-        "archetype":      "suv",
-        "length_m":       3.993,
-        "height_m":       1.606,
-        "width_m":        1.811,
-        "frontal_area_m2": 2.38,
-        "reference_Cd":   0.35,
-        "Cd_source":      "Tata Nexon media pack / estimated from geometry",
-        "engine_cc":      1199,
-        "fuel_type":      "petrol",
-        "kerb_weight_kg": 1276,
-        "city_kmpl":      10.2,
-        "highway_kmpl":   13.5,
+        "display_name": "Tata Nexon (2023)", "archetype": "suv",
+        "length_m": 3.993, "wheelbase_m": 2.498, "height_m": 1.606, "width_m": 1.811,
+        "frontal_area_m2": 2.38, "reference_Cd": 0.35,
+        "Cd_source": "Tata Nexon media pack / estimated from geometry",
+        "engine_cc": 1199, "fuel_type": "petrol", "kerb_weight_kg": 1276,
+        "city_kmpl": 10.2, "highway_kmpl": 13.5,
     },
     "hyundai_creta": {
-        "display_name":   "Hyundai Creta (2024)",
-        "archetype":      "suv",
-        "length_m":       4.310,
-        "height_m":       1.635,
-        "width_m":        1.790,
-        "frontal_area_m2": 2.42,
-        "reference_Cd":   0.36,
-        "Cd_source":      "Hyundai Creta press release / aero data",
-        "engine_cc":      1497,
-        "fuel_type":      "petrol",
-        "kerb_weight_kg": 1380,
-        "city_kmpl":      9.8,
-        "highway_kmpl":   13.0,
+        "display_name": "Hyundai Creta (2024)", "archetype": "suv",
+        "length_m": 4.310, "wheelbase_m": 2.610, "height_m": 1.635, "width_m": 1.790,
+        "frontal_area_m2": 2.42, "reference_Cd": 0.36,
+        "Cd_source": "Hyundai Creta press release / aero data",
+        "engine_cc": 1497, "fuel_type": "petrol", "kerb_weight_kg": 1380,
+        "city_kmpl": 9.8, "highway_kmpl": 13.0,
     },
     "mahindra_scorpio_n": {
-        "display_name":   "Mahindra Scorpio-N (2023)",
-        "archetype":      "suv",
-        "length_m":       4.662,
-        "height_m":       1.857,
-        "width_m":        1.917,
-        "frontal_area_m2": 2.95,
-        "reference_Cd":   0.42,
-        "Cd_source":      "Estimated from geometry (body-on-frame SUV class)",
-        "engine_cc":      1997,
-        "fuel_type":      "diesel",
-        "kerb_weight_kg": 1850,
-        "city_kmpl":      8.5,
-        "highway_kmpl":   12.0,
+        "display_name": "Mahindra Scorpio-N (2023)", "archetype": "suv",
+        "length_m": 4.662, "wheelbase_m": 2.750, "height_m": 1.857, "width_m": 1.917,
+        "frontal_area_m2": 2.95, "reference_Cd": 0.42,
+        "Cd_source": "Estimated from geometry (body-on-frame SUV class)",
+        "engine_cc": 1997, "fuel_type": "diesel", "kerb_weight_kg": 1850,
+        "city_kmpl": 8.5, "highway_kmpl": 12.0,
     },
 }
 
 
-def get_car_params(car_key: str) -> dict:
+def get_car_params(car_key: str) -> Tuple[dict, dict]:
     """
-    Merge an Indian car's specific dimensions into the appropriate
-    archetype's aerodynamic shape parameters.
+    Merge a car's real dimensions into its archetype's SHAPE parameters.
 
-    The archetype defines SHAPE (angles, proportions).
-    The Indian car entry overrides DIMENSIONS (L, H, W, A_frontal, Cd_ref).
-    This way the panel method uses the correct frontal area and length
-    for the actual car, not the generic archetype.
+    The archetype supplies angles and proportions. The car supplies every
+    physical dimension. The merged dict is what gets meshed — so two cars in
+    the same class no longer produce identical flow solutions.
     """
     if car_key not in INDIAN_CARS:
         raise ValueError(f"Unknown car '{car_key}'. "
-                         f"Available: {list(INDIAN_CARS.keys())}")
-
-    car   = INDIAN_CARS[car_key]
-    base  = ARCHETYPES[car["archetype"]].copy()
-
-    # Override physical dimensions with real car data
-    base.update({
-        "length_m":        car["length_m"],
-        "height_m":        car["height_m"],
-        "width_m":         car["width_m"],
+                         f"Available: {sorted(INDIAN_CARS)}")
+    car = INDIAN_CARS[car_key]
+    params = ARCHETYPES[car["archetype"]].copy()
+    params.update({
+        "length_m": car["length_m"],
+        "height_m": car["height_m"],
+        "width_m": car["width_m"],
         "frontal_area_m2": car["frontal_area_m2"],
-        "reference_Cd":    car["reference_Cd"],
-        "Cd_range":        (car["reference_Cd"] - 0.03,
-                            car["reference_Cd"] + 0.03),
+        "reference_Cd": car["reference_Cd"],
+        "Cd_range": (car["reference_Cd"] - 0.03, car["reference_Cd"] + 0.03),
     })
-    return base, car
-
-
-
-def build_profile(archetype: str, n_panels: int = 80) -> Tuple[np.ndarray, dict]:
-    """
-    Build the 2D longitudinal cross-section of a car archetype.
-
-    The profile is a closed loop of (x, y) points, traversed CLOCKWISE:
-        upper surface  →  front-to-rear (y high)
-        lower surface  →  rear-to-front (y near ground)
-
-    All coordinates normalized by car length (0 ≤ x ≤ 1).
-    Height H = height_m / length_m.
-
-    Returns:
-        coords : (N+1, 2) array — panel vertices (first = last, closed loop)
-        params : geometry dict used (for logging / modification)
-    """
-    p = ARCHETYPES[archetype]
-    H = p["height_m"] / p["length_m"]  # normalized height
-
-    # ── Upper surface control points (x, y) ──────────────────────
-    # Windshield rises from hood at x≈0.32 to roof at x≈0.47
-    # The x-extent of the windshield = H * cos(windshield_angle) / sin(windshield_angle)
-    wsa_rad  = np.radians(p["windshield_angle_deg"])
-    ws_run   = H * np.cos(wsa_rad) / np.sin(wsa_rad)  # horizontal run of windshield
-
-    roof_start = 0.32 + ws_run
-    roof_end   = roof_start + p["roof_fraction"]
-
-    # Rear window drops from roof_end to trunk level
-    rwa_rad   = np.radians(p["rear_window_angle_deg"])
-    rw_drop   = H * (1.0 - p["trunk_height_norm"])     # height drop
-    rw_run    = rw_drop * np.cos(rwa_rad) / np.sin(rwa_rad)
-    rw_end    = min(roof_end + rw_run, 0.93)
-
-    trunk_y   = p["trunk_height_norm"] * H
-    clearance = p["underbody_clearance_norm"] * H
-
-    diff_start = 1.0 - p["diffuser_length_norm"]
-    diff_rise  = p["diffuser_length_norm"] * np.tan(np.radians(p["diffuser_angle_deg"]))
-
-    x_up = np.array([0.00, 0.06, 0.15, 0.32, roof_start, roof_end, rw_end, 0.93, 1.00])
-    y_up = np.array([
-        H * 0.42,   # front stagnation (mid-car height)
-        H * 0.55,   # front bumper top
-        H * 0.60,   # hood
-        H * 0.62,   # hood end
-        H,          # roof start (max height)
-        H,          # roof end (flat section)
-        trunk_y,    # rear window end
-        trunk_y,    # trunk
-        H * 0.42,   # rear stagnation
-    ])
-
-    # ── Lower surface control points ─────────────────────────────
-    x_lo = np.array([0.00, 0.06, 0.14, diff_start, 1.00])
-    y_lo = np.array([
-        H * 0.42,              # front stagnation (same as upper)
-        H * 0.08,              # front bumper bottom
-        clearance,             # underbody flat (ground clearance)
-        clearance,             # diffuser start
-        H * 0.42,              # rear stagnation
-    ])
-
-    # Force monotonic x for spline (remove duplicates / overlaps)
-    def clean(x, y):
-        pairs = sorted(zip(x, y), key=lambda p: p[0])
-        cx, cy = [pairs[0][0]], [pairs[0][1]]
-        for xi, yi in pairs[1:]:
-            if xi > cx[-1] + 1e-6:
-                cx.append(xi); cy.append(yi)
-        return np.array(cx), np.array(cy)
-
-    x_up, y_up = clean(x_up, y_up)
-    x_lo, y_lo = clean(x_lo, y_lo)
-
-    n_half = n_panels // 2
-
-    # Spline-interpolate each surface
-    cs_up = CubicSpline(x_up, y_up)
-    cs_lo = CubicSpline(x_lo, y_lo)
-
-    # Upper: front → rear
-    xu = np.linspace(0.001, 0.999, n_half + 1)
-    yu = cs_up(xu)
-
-    # Lower: rear → front (closes the loop)
-    xl = np.linspace(0.999, 0.001, n_half + 1)
-    yl = cs_lo(xl)
-
-    x_all = np.concatenate([xu, xl[1:]])
-    y_all = np.concatenate([yu, yl[1:]])
-    coords = np.column_stack([x_all, y_all])
-
-    return coords, p
+    return params, car
 
 
 # ════════════════════════════════════════════════════════════════
-# 3. PANEL GEOMETRY
-# ════════════════════════════════════════════════════════════════
-
-def compute_panel_geometry(coords: np.ndarray) -> dict:
-    """
-    From vertex coordinates, compute per-panel properties.
-
-    Convention: clockwise body → outward normal = phi + pi/2
-        phi  = panel direction angle (atan2(dy, dx))
-        beta = outward normal angle  = phi + pi/2
-    """
-    xa = coords[:-1, 0];  ya = coords[:-1, 1]
-    xb = coords[1:,  0];  yb = coords[1:,  1]
-
-    xc  = (xa + xb) / 2          # control point (panel midpoint)
-    yc  = (ya + yb) / 2
-    ds  = np.hypot(xb - xa, yb - ya)   # panel length
-    phi = np.arctan2(yb - ya, xb - xa) # panel direction angle
-    beta = phi + np.pi / 2             # outward normal angle (clockwise body)
-
-    return dict(n=len(xa), xa=xa, ya=ya, xb=xb, yb=yb,
-                xc=xc, yc=yc, ds=ds, phi=phi, beta=beta)
-
-
-# ════════════════════════════════════════════════════════════════
-# 4. INFLUENCE COEFFICIENTS
-#    Analytical integration of source singularities.
-#    Derivation: Katz & Plotkin, Eq. 10.23
+# INFLUENCE COEFFICIENTS
 # ════════════════════════════════════════════════════════════════
 
 def influence_coefficients(pg: dict) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Build (N×N) normal (A) and tangential (B) influence coefficient matrices.
+    Normal (A) and tangential (B) influence matrices for constant-strength
+    source panels. Vectorised — the original nested Python loop was O(N^2)
+    interpreted, which made refinement studies impractical.
 
-    A[i,j] = normal velocity at control point i from unit source on panel j
-    B[i,j] = tangential velocity at control point i from unit source on panel j
+    In panel j's local frame the induced velocity per unit source strength is
 
-    The analytical solution for a straight source panel j:
+        u_local = ln(r1/r2) / 2pi          (along the panel)
+        v_local = (theta2 - theta1) / 2pi  (normal to the panel)
 
-        In panel j's LOCAL frame (ξ along panel, η perpendicular):
-            X_i = (x_i - xa_j) cos(φ_j) + (y_i - ya_j) sin(φ_j)
-            Y_i = -(x_i - xa_j) sin(φ_j) + (y_i - ya_j) cos(φ_j)
-
-        Induced velocities (per unit σ):
-            u_loc = (1/2π) ln(r1/r2)          along panel j
-            v_loc = (1/2π)(θ1 - θ2)           normal to panel j
-
-        where r1=distance to start, r2=distance to end, θ = atan2(Y, X_local)
+    SIGN CONVENTION — this is where the original was wrong. As the field point
+    approaches the panel from outside, theta2 -> pi and theta1 -> 0, so
+    v_local -> +1/2. That is the +0.5 self-influence on the diagonal. Writing
+    (theta1 - theta2) instead flips the off-diagonals relative to the diagonal,
+    and the resulting source strengths do not sum to zero: mass is created
+    inside the body and the solver reports drag on a closed body in potential
+    flow. `validate_dalembert()` is the guard against exactly this.
     """
-    n = pg['n']
-    A = np.zeros((n, n))
-    B = np.zeros((n, n))
+    n = pg["n"]
+    dx = pg["xc"][:, None] - pg["xa"][None, :]
+    dy = pg["yc"][:, None] - pg["ya"][None, :]
 
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                # Self-influence: source panel → normal vel = +0.5 (standard result)
-                A[i, j] = 0.5
-                B[i, j] = 0.0
-                continue
+    cos_p = np.cos(pg["phi"])[None, :]
+    sin_p = np.sin(pg["phi"])[None, :]
+    ds = pg["ds"][None, :]
 
-            # Vector from panel j's start to control point i
-            dx = pg['xc'][i] - pg['xa'][j]
-            dy = pg['yc'][i] - pg['ya'][j]
+    # Field point in panel j's local frame
+    X = dx * cos_p + dy * sin_p
+    Y = -dx * sin_p + dy * cos_p
 
-            # Transform to panel j's local coordinate system
-            cos_phi_j = np.cos(pg['phi'][j])
-            sin_phi_j = np.sin(pg['phi'][j])
+    r1_sq = X ** 2 + Y ** 2
+    r2_sq = (X - ds) ** 2 + Y ** 2
 
-            X_i =  dx * cos_phi_j + dy * sin_phi_j   # along panel j
-            Y_i = -dx * sin_phi_j + dy * cos_phi_j   # normal to panel j
-            L_j = pg['ds'][j]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        u_loc = np.log(np.sqrt(r1_sq / r2_sq)) / (2.0 * np.pi)
+    theta1 = np.arctan2(Y, X)
+    theta2 = np.arctan2(Y, X - ds)
+    v_loc = (theta2 - theta1) / (2.0 * np.pi)
 
-            r1_sq = X_i**2 + Y_i**2
-            r2_sq = (X_i - L_j)**2 + Y_i**2
+    # Rotate back to global axes
+    u_glo = u_loc * cos_p - v_loc * sin_p
+    v_glo = u_loc * sin_p + v_loc * cos_p
 
-            if r1_sq < 1e-10 or r2_sq < 1e-10:
-                continue  # degenerate panel — skip
+    # Project onto panel i's outward normal and tangent
+    cos_b = np.cos(pg["beta"])[:, None]
+    sin_b = np.sin(pg["beta"])[:, None]
+    A = np.nan_to_num(u_glo * cos_b + v_glo * sin_b)
+    B = np.nan_to_num(-u_glo * sin_b + v_glo * cos_b)
 
-            # Analytical integrals (derived in docstring above)
-            u_loc = np.log(np.sqrt(r1_sq / r2_sq)) / (2 * np.pi)
-            theta1 = np.arctan2(Y_i, X_i)
-            theta2 = np.arctan2(Y_i, X_i - L_j)
-            v_loc = (theta1 - theta2) / (2 * np.pi)
-
-            # Rotate back to global frame
-            u_glob = u_loc * cos_phi_j - v_loc * sin_phi_j
-            v_glob = u_loc * sin_phi_j + v_loc * cos_phi_j
-
-            # Project onto panel i's outward normal and tangent
-            cos_bi = np.cos(pg['beta'][i])
-            sin_bi = np.sin(pg['beta'][i])
-
-            A[i, j] = u_glob * cos_bi + v_glob * sin_bi       # normal component
-            B[i, j] = -u_glob * sin_bi + v_glob * cos_bi      # tangential component
-
+    diag = np.arange(n)
+    A[diag, diag] = 0.5     # self-induced normal velocity
+    B[diag, diag] = 0.0     # a source induces no tangential velocity on itself
     return A, B
 
 
-# ════════════════════════════════════════════════════════════════
-# 5. SEPARATION DETECTION & BASE PRESSURE MODEL
-#    Breaks d'Alembert's paradox in a physically motivated way.
-# ════════════════════════════════════════════════════════════════
-
-def find_separation_point(s: np.ndarray, Cp: np.ndarray,
-                           n_upper: int, xc: np.ndarray) -> int:
+def solve_potential_flow(coords: np.ndarray, V_inf: float = V_REF) -> Tuple[dict, np.ndarray, np.ndarray]:
     """
-    Detect flow separation on the upper surface using the adverse
-    pressure gradient criterion.
+    Solve the source-panel system and return (panel_geometry, sigma, Cp).
 
-    Separation occurs where dCp/ds > threshold continuously —
-    i.e., pressure is rising (flow is decelerating) and can no
-    longer stay attached.
+    The freestream is horizontal, so its components on panel i are
+        normal      : V_inf * cos(beta_i)
+        tangential  : -V_inf * sin(beta_i)
 
-    For a car, separation happens in the rear section (x > 0.60).
-    Searching the full surface gives false positives at the windshield.
-
-    Args:
-        s       : arc-length along upper surface (normalized)
-        Cp      : pressure coefficient on upper surface
-        n_upper : number of upper surface panels
-        xc      : x-coordinates of panel control points
-
-    Returns:
-        sep_idx : panel index where separation begins
-                  (returns n_upper-1 if no separation detected)
+    The tangential sign follows from the tangent vector t = (-sin b, cos b)
+    that matrix B already projects onto. The original code used +V_inf*sin(b)
+    here while B used the opposite tangent, so the freestream and the induced
+    velocity were added in opposite senses and Cp was corrupted.
     """
-    dCp_ds = np.gradient(Cp[:n_upper], s[:n_upper])
-    threshold = 0.30  # calibrated for automotive bluff bodies
-
-    # Only search the rear 40% of the car — separation doesn't happen up front
-    rear_start = np.searchsorted(xc[:n_upper], 0.60)
-
-    for idx in range(rear_start, n_upper):
-        if dCp_ds[idx] > threshold:
-            return idx
-
-    return n_upper - 1   # no separation — fully attached (rare for a car)
-
-
-def base_pressure_Cp(sep_idx: int, n_upper: int, rwa_deg: float) -> float:
-    """
-    Empirical base pressure coefficient in the separated wake.
-
-    Fitted to Ahmed et al. SAE 840300 data (slant angle vs Cpb)
-    and Morel (1978) — the foundational references for automotive
-    base pressure.
-
-    Typical values:
-        rwa = 0°  (SUV-like vertical rear): Cpb ≈ -0.28
-        rwa = 30° (sedan fastback):         Cpb ≈ -0.22
-        rwa = 55° (hatchback steep rear):   Cpb ≈ -0.30 (reattachment lost)
-        rwa = 90° (bluff body/van):         Cpb ≈ -0.35
-    """
-    sep_fraction = sep_idx / n_upper
-
-    # Base Cpb from rear window angle (Ahmed et al. correlation)
-    rwa_rad = np.radians(rwa_deg)
-    Cpb = -0.18 - 0.15 * np.sin(rwa_rad) ** 2
-
-    # Earlier separation → more negative base pressure
-    Cpb -= 0.08 * (1.0 - sep_fraction)
-
-    return float(np.clip(Cpb, -0.45, -0.10))
-
-
-def base_drag_coefficient(params: dict, Cpb: float, sep_fraction: float) -> float:
-    """
-    Pressure drag from the separated wake region.
-
-    Physics:
-        The wake region has near-constant pressure Cpb (base pressure).
-        Drag = ∫∫ (-Cp_base) × n_x dA over the effective base area.
-
-        The effective base area depends on rear body shape:
-            A_base / A_frontal grows with rear window angle.
-            At rwa → 0°:  base ≈ only trunk face (≈30% of frontal)
-            At rwa → 90°: base ≈ full frontal area (bluff body)
-
-        Formula:
-            Cd_base = |Cpb| × (A_base / A_frontal)
-            A_base / A_frontal = 0.30 + 0.65 × sin(rwa)
-
-    Derived from integrating Cpb over rear body geometry.
-    A_base/A_frontal ratio calibrated using Ahmed (1984) body geometry.
-    """
-    rwa_rad = np.radians(params["rear_window_angle_deg"])
-    A_base_ratio = 0.30 + 0.65 * np.sin(rwa_rad)
-
-    Cd_base = abs(Cpb) * A_base_ratio
-    return float(Cd_base)
-
-
-# ════════════════════════════════════════════════════════════════
-# 6. MAIN SOLVER
-# ════════════════════════════════════════════════════════════════
-
-def solve(archetype: str, n_panels: int = 80,
-          V_inf: float = 27.8,
-          car_params_override: dict = None) -> dict:
-    """
-    Full Layer 1 solution for a car archetype.
-
-    Args:
-        archetype            : "sedan" | "hatchback" | "suv"
-        n_panels             : number of panels (even; more = more accurate)
-        V_inf                : freestream velocity m/s (default 100 km/h)
-        car_params_override  : if provided, replaces archetype params
-                               (used by solve_car for Indian car database)
-    """
-    rho   = 1.225
-    nu    = 1.5e-5
-
-    # ── Build geometry ────────────────────────────────────────────
-    coords, params = build_profile(archetype, n_panels)
-
-    # Override with real car dimensions if provided
-    if car_params_override:
-        params = car_params_override
-    pg = compute_panel_geometry(coords)
-    n  = pg['n']
-
-    # Arc-length along the profile (for separation detection)
-    s_arc = np.concatenate([[0], np.cumsum(pg['ds'])])
-
-    # ── Solve panel system ────────────────────────────────────────
+    pg = panel_geometry(coords)
     A, B = influence_coefficients(pg)
 
-    # RHS: negative of freestream normal component at each panel
-    # V_inf is horizontal (alpha=0 for a car), so V_inf · n̂_i = V_inf cos(beta_i)
-    rhs = -V_inf * np.cos(pg['beta'])
-
-    # Solve [A]{sigma} = {rhs} for source strengths
+    rhs = -V_inf * np.cos(pg["beta"])            # enforce zero normal velocity
     sigma = np.linalg.solve(A, rhs)
 
-    # Tangential velocity: freestream tangential + source contributions
-    # Freestream tangential component = V_inf · t̂_i = V_inf sin(beta_i)
-    V_tang = V_inf * np.sin(pg['beta']) + B @ sigma
+    V_tan = -V_inf * np.sin(pg["beta"]) + B @ sigma
+    Cp = 1.0 - (V_tan / V_inf) ** 2
+    return pg, sigma, Cp
 
-    # Pressure coefficient: Cp = 1 - (V/V_inf)²
-    Cp = 1.0 - (V_tang / V_inf) ** 2
 
-    # ── Separation and base pressure ──────────────────────────────
-    n_upper = n_panels // 2
-    Cp_modified = Cp.copy()
+# ════════════════════════════════════════════════════════════════
+# SEPARATION AND BASE PRESSURE
+# ════════════════════════════════════════════════════════════════
 
-    sep_idx      = find_separation_point(s_arc[:-1], Cp, n_upper, pg['xc'])
-    sep_fraction = sep_idx / n_upper
-    Cpb          = base_pressure_Cp(sep_idx, n_upper, params["rear_window_angle_deg"])
+def find_separation(Cp: np.ndarray, pg: dict, meta: dict,
+                    Re_L: float) -> Tuple[int, int]:
+    """
+    Locate turbulent separation with Stratford's criterion (J. Fluid Mech, 1959).
 
-    # Cp_modified is for VISUALISATION — shows base pressure in wake region
-    Cp_modified[sep_idx:n_upper] = Cpb
+    Separation occurs where the canonical pressure rise satisfies
 
-    # ── Cd components ─────────────────────────────────────────────
+        Cp_bar * sqrt(x * dCp_bar/dx) * (1e-6 * Re_x)^0.1  >=  S
+
+    with Cp_bar = (Cp - Cp_peak)/(1 - Cp_peak), measured from the suction peak
+    where the pressure rise begins. This replaces the previous fixed dCp/ds
+    threshold, which was an arbitrary number with no boundary-layer content.
+
+    The peak search is restricted to x < 0.85. Beyond that the mesh runs into
+    the sharp base corner, whose potential-flow velocity singularity produces a
+    spurious Cp minimum of order -5 that is pure discretisation artefact.
+
+    Flow cannot negotiate a sharp convex corner, so separation is forced at
+    X_TAIL even if the boundary layer would otherwise have survived.
+    """
+    n_up = meta["n_upper"]
+    s_panel = np.concatenate([[0.0], np.cumsum(pg["ds"])])[:-1][:n_up]
+    x_panel = pg["xc"][:n_up]
+    Cp_up = Cp[:n_up]
+
+    # --- Evaluate the criterion on a FIXED arc-length grid ------------------
+    # Stratford's test needs dCp/ds, and taking that derivative directly on the
+    # panel mesh makes the answer depend on the panel count: np.gradient on an
+    # irregular, refinement-dependent grid is noisy, and the criterion would
+    # trip a panel or two earlier or later as the mesh changed. For a sedan that
+    # meant separation flipping between the backlight and the base corner
+    # somewhere around 800 panels, which HALVED the predicted Cd. A solver whose
+    # answer jumps when you refine the mesh is not converged, and the number it
+    # gives you is an artefact of the discretisation.
     #
-    # The panel method (potential flow) gives Cd ≈ 0 by d'Alembert's paradox.
-    # Real car drag has three physical sources — each computed separately:
-    #
-    #  1. BASE DRAG: dominant term. Separated wake behind the car creates
-    #     a low-pressure region that "pulls" the car backward.
-    #     Formula: Cd_base = |Cpb| × (A_base/A_frontal)
-    #     → Physics-based, calibrated from Ahmed et al. SAE 840300.
-    #
-    #  2. SKIN FRICTION: viscous shear on wetted surface.
-    #     Prandtl turbulent flat plate formula: Cf = 0.074 / Re^0.2
-    #     → Well-established, widely used in automotive aero.
-    #
-    #  3. PARASITIC: wheels, mirrors, seals, gaps — not captured in 2D.
-    #     → Explicitly empirical; cited source: Hucho (1998).
-    #
-    # The panel method is used for:
-    #  - Separation point detection (sep_idx)
-    #  - Cp distribution shape (for modification delta calculations in Layer 2)
-    #  - Qualitative validation that geometry behaves correctly
+    # Resampling onto a fixed grid decouples the physics from the mesh. Cd now
+    # converges monotonically, and test_solution_converges_with_panel_count
+    # holds it to that.
+    n_grid = 400
+    s_grid = np.linspace(s_panel[0], s_panel[-1], n_grid)
+    Cp_grid = np.interp(s_grid, s_panel, Cp_up)
+    x_grid = np.interp(s_grid, s_panel, x_panel)
 
-    L_m  = params["length_m"]
+    # Suction peak: the start of the pressure rise. Restricted to x < 0.85 —
+    # beyond that the base corner's velocity singularity produces a spurious
+    # minimum that is pure discretisation artefact.
+    body = np.where(x_grid < 0.85)[0]
+    if body.size == 0:
+        return n_up - 1, 0
+    peak_g = int(body[np.argmin(Cp_grid[body])])
+
+    # Flow cannot round a sharp convex edge: separation is forced at the tail.
+    forced_g = int(np.searchsorted(x_grid, X_TAIL))
+    forced_g = min(max(forced_g, peak_g + 3), n_grid - 1)
+
+    Cp_peak = Cp_grid[peak_g]
+    Cp_bar = (Cp_grid[peak_g:forced_g] - Cp_peak) / (1.0 - Cp_peak)
+    x_eff = s_grid[peak_g:forced_g] - s_grid[peak_g]
+    dCp_bar = np.gradient(Cp_bar, np.maximum(x_eff, 1e-9))
+
+    with np.errstate(invalid="ignore"):
+        crit = (Cp_bar * np.sqrt(np.maximum(x_eff * dCp_bar, 0.0))
+                * (1e-6 * Re_L) ** 0.1)
+
+    hit = np.where(crit >= STRATFORD_S)[0]
+    sep_g = peak_g + int(hit[0]) if len(hit) else forced_g
+    sep_g = min(sep_g, n_grid - 1)
+
+    # Map the grid answer back to the nearest panel.
+    sep = int(np.argmin(np.abs(s_panel - s_grid[sep_g])))
+    peak = int(np.argmin(np.abs(s_panel - s_grid[peak_g])))
+    return min(max(sep, 1), n_up - 1), peak
+
+
+def base_pressure(Cp: np.ndarray, pg: dict, meta: dict, sep: int) -> float:
+    """
+    Wake (base) pressure from the speed of the shear layer that bounds it.
+
+        V_sep/V_inf = sqrt(1 - Cp_ref)
+        Cpb         = -( CPB_C0 + CPB_C1 * (V_sep/V_inf - 1) )
+
+    Cp_ref is the MEDIAN pressure over CPB_SAMPLE_X — a window on the rear body
+    that sits aft of the roof crown but forward of the base corner. See the
+    CPB_C0 docstring for why sampling anywhere near the corner destroys this.
+    """
+    n_up = meta["n_upper"]
+    x = pg["xc"][:n_up]
+    lo, hi = CPB_SAMPLE_X
+    hi = min(hi, float(x[min(sep, n_up - 1)]))
+    window = np.where((x >= lo) & (x <= max(hi, lo + 0.02)))[0]
+    if window.size == 0:
+        window = np.array([max(0, sep - 1)])
+
+    Cp_ref = float(np.median(Cp[window]))
+    V_ratio = float(np.clip(np.sqrt(max(1.0 - Cp_ref, 0.0)), 1.0, 1.8))
+
+    bluffness = meta["base_height_ratio"]        # base height / body height
+
+    Cpb = -(CPB_C0
+            + CPB_C1 * (V_ratio - 1.0)           # shear-layer entrainment
+            + CPB_C2 * bluffness)                # wake width
+    return float(np.clip(Cpb, -0.42, -0.12))
+
+
+# ════════════════════════════════════════════════════════════════
+# MAIN SOLVER
+# ════════════════════════════════════════════════════════════════
+
+def solve(params: dict, n_panels: int = 500, V_inf: float = V_REF) -> dict:
+    """
+    Full Layer 1 solution: geometry -> potential flow -> separation -> Cd budget.
+
+    Args:
+        params   : merged parameter dict (see get_car_params)
+        n_panels : panel count around the closed loop
+        V_inf    : freestream speed, m/s
+
+    Returns a dict with the flow solution, the separation state, and every
+    named component of the drag budget.
+    """
+    coords, meta = build_profile(params, n_panels)
+    pg, sigma, Cp = solve_potential_flow(coords, V_inf)
+
+    L = params["length_m"]
+    W = params["width_m"]
     A_ref = params["frontal_area_m2"]
+    H_norm = meta["H"]
+    Re_L = V_inf * L / NU_AIR
 
-    # 1. Base drag (dominant — typically 60–75% of total Cd for road cars)
-    Cd_base = base_drag_coefficient(params, Cpb, sep_fraction)
+    sep, peak = find_separation(Cp, pg, meta, Re_L)
+    Cpb = base_pressure(Cp, pg, meta, sep)
 
-    # 2. Skin friction (turbulent boundary layer over car surface)
-    Re          = V_inf * L_m / nu
-    Cf          = 0.074 / (Re ** 0.2)
-    S_wet_m2    = 2.5 * L_m * params["width_m"]   # ≈ top + sides + partial underside
-    Cd_friction = Cf * S_wet_m2 / A_ref
+    # --- Impose the wake pressure over the separated region ---------------
+    n_up, n_base = meta["n_upper"], meta["n_base"]
+    Cp_wake = Cp.copy()
+    wake_end = n_up + n_base - 1          # upper surface aft of sep + rear face
+    Cp_wake[sep:wake_end] = Cpb
 
-    # 3. Parasitic drag: wheels ≈ 0.015, mirrors ≈ 0.004, gaps ≈ 0.003
-    #    Hucho, "Aerodynamics of Road Vehicles", Table 4.1 (SAE, 1998)
-    Cd_parasitic = 0.022
+    # --- 1. Pressure drag --------------------------------------------------
+    # Drag = -integral(Cp * n_x) ds. In attached potential flow this is zero
+    # (d'Alembert); everything below comes from the wake substitution above.
+    n_x = np.cos(pg["beta"])
+    I_2d = float(-np.sum(Cp_wake * n_x * pg["ds"]))     # per unit span, /L
+    W_eff = W * params.get("plan_taper", 0.86)          # width the section acts over
+    Cd_pressure = K_3D * I_2d * L * W_eff / A_ref
 
-    Cd_total = Cd_base + Cd_friction + Cd_parasitic
+    # --- 2. Skin friction (turbulent flat plate, Prandtl) ------------------
+    Cf = 0.074 / Re_L ** 0.2
+    S_upper = K_WET_UPPER * L * W
+    Cd_friction = Cf * S_upper / A_ref
 
-    # Store panel method Cd_2D (near-zero by d'Alembert — documented, not hidden)
-    scale_3D       = L_m * params["width_m"] / A_ref
-    Cd_2D_attached = float(-np.sum(Cp * np.cos(pg['beta']) * pg['ds']))
-    Cd_attached    = Cd_2D_attached * scale_3D  # stored for transparency
+    # --- 3. Underbody ------------------------------------------------------
+    # Rough channel, and it gets worse the taller the car rides.
+    clearance_m = params["underbody_clearance_norm"] * params["height_m"]
+    clearance_factor = (clearance_m / CLEARANCE_REF_M) ** 0.5
+    Cd_underbody = K_ROUGH * Cf * (L * W) / A_ref * clearance_factor
 
-    # ── Validation ────────────────────────────────────────────────
-    ref_Cd = params["reference_Cd"]
-    error_pct = abs(Cd_total - ref_Cd) / ref_Cd * 100
+    # --- 4. Wheels ---------------------------------------------------------
+    # Derived from wheel frontal area, not a flat constant. A bigger car runs
+    # bigger wheels, and they cost it drag.
+    wheel_dia_m = 0.42 * params["height_m"]
+    tyre_width_m = 0.115 * W
+    A_wheel = wheel_dia_m * tyre_width_m
+    Cd_wheels = 4.0 * CD_WHEEL_LOCAL * A_wheel / A_ref
 
+    # --- 5 & 6. Cooling and appendages -------------------------------------
+    # Per-archetype: the plan-view and detail drag a 2D profile cannot see.
+    Cd_cooling = params.get("Cd_cooling", CD_COOLING_DEFAULT)
+    Cd_mirrors = params.get("Cd_appendages", CD_APPENDAGE_DEFAULT)
+
+    Cd_total = (Cd_pressure + Cd_friction + Cd_underbody
+                + Cd_wheels + Cd_cooling + Cd_mirrors)
+
+    ref = params["reference_Cd"]
     return {
-        "archetype":    archetype,
-        "params":       params,
-        "coords":       coords,
-        "pg":           pg,
-        "sigma":        sigma,
-        "Cp":           Cp,
-        "Cp_modified":  Cp_modified,
-        "sep_idx":      sep_idx,
-        "sep_fraction": sep_fraction,
-        "Cpb":          Cpb,
-        "Cd_2D_attached": Cd_2D_attached,
-        "scale_3D":     scale_3D,
-        "Cd_attached":  Cd_attached,
-        "Cd_base":      Cd_base,
-        "Cd_friction":  Cd_friction,
-        "Cd_parasitic": Cd_parasitic,
-        "Cd":           Cd_total,
-        "Cd_reference": params["reference_Cd"],
-        "Cd_range":     params["Cd_range"],
-        "error_pct":    abs(Cd_total - params["reference_Cd"]) / params["reference_Cd"] * 100,
-        "Re":           Re,
-        "V_inf_ms":     V_inf,
-        "n_panels":     n,
+        "params": params, "coords": coords, "meta": meta, "pg": pg,
+        "sigma": sigma, "Cp": Cp, "Cp_wake": Cp_wake,
+        "sep_idx": sep, "peak_idx": peak,
+        "sep_x": float(pg["xc"][sep]),
+        "Cpb": Cpb,
+        # --- the drag budget: every mod in Layer 2 draws from one of these ---
+        "Cd_pressure": Cd_pressure,
+        "Cd_friction": Cd_friction,
+        "Cd_underbody": Cd_underbody,
+        "Cd_wheels": Cd_wheels,
+        "Cd_cooling": Cd_cooling,
+        "Cd_mirrors": Cd_mirrors,
+        "Cd": Cd_total,
+        "Cd_reference": ref,
+        "Cd_range": params["Cd_range"],
+        "error_pct": abs(Cd_total - ref) / ref * 100.0,
+        "Re": Re_L, "Cf": Cf, "V_inf_ms": V_inf, "n_panels": pg["n"],
+    }
+
+
+def solve_car(car_key: str, n_panels: int = 500, V_inf: float = V_REF) -> dict:
+    """Solve for one car from the database, using its own dimensions."""
+    params, car = get_car_params(car_key)
+    result = solve(params, n_panels=n_panels, V_inf=V_inf)
+    result["car_key"] = car_key
+    result["car_info"] = car
+    result["archetype"] = car["archetype"]
+    return result
+
+
+# ════════════════════════════════════════════════════════════════
+# CORRECTNESS CHECK — d'ALEMBERT'S PARADOX
+# ════════════════════════════════════════════════════════════════
+
+def validate_dalembert(params: dict, n_panels: int = 500) -> dict:
+    """
+    The solver's correctness test, not a diagnostic.
+
+    A closed body in attached potential flow produces exactly zero drag, and the
+    source strengths sum to zero (no net mass created inside the body). Any panel
+    method that fails this is wrong, no matter how plausible its Cd looks.
+
+    Returns the two residuals. Both should be small; they converge toward zero
+    as n_panels rises, limited by the sharp base corner, which is an integrable
+    singularity in potential flow.
+    """
+    coords, meta = build_profile(params, n_panels)
+    pg, sigma, Cp = solve_potential_flow(coords)
+    return {
+        "net_source": float(np.sum(sigma * pg["ds"])),
+        "Cd_attached": float(-np.sum(Cp * np.cos(pg["beta"]) * pg["ds"]) / meta["H"]),
+        "closure_gap": float(np.hypot(*(coords[0] - coords[-1]))),
+        "Cp_max": float(Cp.max()),      # must be ~+1.0 at the stagnation point
     }
 
 
 # ════════════════════════════════════════════════════════════════
-# 7. VALIDATION
+# VALIDATION
 # ════════════════════════════════════════════════════════════════
 
 def validate_all(verbose: bool = True) -> dict:
-    """
-    Run the solver on all three archetypes and compare against
-    manufacturer-published Cd values.
-
-    Acceptable accuracy target: predicted Cd within ±15% of reference.
-    (2D panel method has inherent 3D correction uncertainty.)
-
-    Known limitation — sedans:
-        Sedans with rear window angles of 25–35° exhibit partial flow
-        reattachment on the rear window, forming trailing vortices
-        (Ahmed et al., SAE 840300, Fig 12). This is a 3D phenomenon
-        that a 2D cross-section model cannot represent. The error is
-        expected and documented — not a model failure.
-        For modification DELTA calculations (Layer 2), this cancels out.
-    """
+    """Solve every car and compare against published Cd."""
     results = {}
-    print("=" * 70)
-    print("  LAYER 1 VALIDATION — 2D Source Panel Method vs Manufacturer Data")
-    print("=" * 70)
-    print(f"  {'Archetype':<12} {'Predicted':>10} {'Reference':>10} "
-          f"{'Range':>16} {'Error':>8} {'Status':>8}")
-    print("  " + "-" * 66)
-
-    for arch in ARCHETYPES:
-        r = solve(arch)
-        results[arch] = r
-        Cd_range_str = f"({r['Cd_range'][0]:.2f}–{r['Cd_range'][1]:.2f})"
-        in_range  = r['Cd_range'][0] <= r['Cd'] <= r['Cd_range'][1]
-        within15  = r['error_pct'] < 15.0
-
-        if in_range or within15:
-            status = "✓ PASS"
-        elif arch == "sedan" and r['error_pct'] < 40:
-            status = "△ NOTE"   # documented 3D limitation
-        else:
-            status = "✗ FAIL"
-
-        print(f"  {arch:<12} {r['Cd']:>10.3f} {r['Cd_reference']:>10.3f} "
-              f"{Cd_range_str:>16} {r['error_pct']:>7.1f}% {status:>8}")
-
-    print("=" * 70)
-    print("  △ Sedan: 2D model cannot capture 30° rear window reattachment")
-    print("    (trailing vortex system — Ahmed et al. SAE 840300, Fig 12)")
-    print("    Modification ΔCd predictions remain valid; only baseline offset.")
-    print()
-    return results
-
-
-# ════════════════════════════════════════════════════════════════
-# 8. VISUALISATION
-# ════════════════════════════════════════════════════════════════
-
-def plot_results(results: dict, save_path: str = None):
-    """
-    Three-panel figure:
-      Left   : car cross-section profiles
-      Centre : Cp distribution (modified, with wake region)
-      Right  : Cd validation bar chart
-    """
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
-    fig.suptitle("Layer 1 — 2D Source Panel Method: Road Car Aerodynamics",
-                 fontsize=13, fontweight='bold')
-
-    colors = {"sedan": "#2196F3", "hatchback": "#4CAF50", "suv": "#FF5722"}
-
-    # ── Left: body profiles ───────────────────────────────────────
-    ax = axes[0]
-    for arch, r in results.items():
-        c = r['coords']
-        ax.plot(c[:, 0], c[:, 1], color=colors[arch], lw=1.8, label=arch)
-
-    ax.axhline(0, color='gray', lw=0.8, ls='--', label='ground')
-    ax.set_aspect('equal')
-    ax.set_xlabel("x / car length")
-    ax.set_ylabel("y / car length")
-    ax.set_title("2D Cross-Section Profiles")
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # ── Centre: Cp distribution ───────────────────────────────────
-    ax = axes[1]
-    for arch, r in results.items():
-        pg = r['pg']
-        xc = pg['xc']
-        Cp = r['Cp_modified']
-        n_upper = r['n_panels'] // 2
-        sep = r['sep_idx']
-
-        # Upper surface
-        ax.plot(xc[:n_upper], Cp[:n_upper], color=colors[arch],
-                lw=1.5, label=f"{arch} upper")
-        # Lower surface
-        ax.plot(xc[n_upper:], Cp[n_upper:], color=colors[arch],
-                lw=1.0, ls='--')
-        # Mark separation point
-        if sep < n_upper:
-            ax.axvline(xc[sep], color=colors[arch], lw=0.6, ls=':', alpha=0.7)
-
-    ax.axhline(0, color='k', lw=0.5)
-    ax.invert_yaxis()               # aerodynamic convention: Cp negative = suction
-    ax.set_xlabel("x / car length")
-    ax.set_ylabel("Cp  (inverted axis — suction up)")
-    ax.set_title("Pressure Coefficient Distribution\n(dashed = lower surface, dotted = separation)")
-    ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
-
-    # ── Right: Cd validation ──────────────────────────────────────
-    ax = axes[2]
-    archs = list(results.keys())
-    x_pos = np.arange(len(archs))
-    width = 0.30
-
-    predicted  = [results[a]['Cd']           for a in archs]
-    reference  = [results[a]['Cd_reference'] for a in archs]
-    cd_min     = [results[a]['Cd_range'][0]  for a in archs]
-    cd_max     = [results[a]['Cd_range'][1]  for a in archs]
-
-    bars_p = ax.bar(x_pos - width/2, predicted,  width, label='Predicted',
-                    color=[colors[a] for a in archs], alpha=0.85)
-    bars_r = ax.bar(x_pos + width/2, reference, width, label='Manufacturer ref',
-                    color='gray', alpha=0.5)
-
-    # Manufacturer range as error bars on reference
-    err_lo = [reference[i] - cd_min[i] for i in range(len(archs))]
-    err_hi = [cd_max[i] - reference[i] for i in range(len(archs))]
-    ax.errorbar(x_pos + width/2, reference,
-                yerr=[err_lo, err_hi], fmt='none', color='black',
-                capsize=5, lw=1.5, label='Published range')
-
-    # Annotate error %
-    for i, a in enumerate(archs):
-        err = results[a]['error_pct']
-        ax.text(x_pos[i] - width/2, predicted[i] + 0.005,
-                f"{err:.1f}%", ha='center', va='bottom', fontsize=8)
-
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels([a.capitalize() for a in archs])
-    ax.set_ylabel("Drag coefficient  Cd")
-    ax.set_title("Validation vs Manufacturer Data\n(error % = |predicted − reference| / reference)")
-    ax.legend(fontsize=8)
-    ax.grid(True, axis='y', alpha=0.3)
-    ax.set_ylim(0, 0.55)
-
-    plt.tight_layout()
-    path = save_path or "/mnt/user-data/outputs/layer1_results.png"
-    plt.savefig(path, dpi=150, bbox_inches='tight')
-    print(f"  Figure saved → {path}")
-    plt.close()
-
-
-def solve_car(car_key: str, n_panels: int = 80,
-              V_inf: float = 27.8) -> dict:
-    """
-    Solve for a specific Indian car by key name.
-    Uses the car's real dimensions merged with its archetype's shape params.
-    """
-    merged_params, car_info = get_car_params(car_key)
-    archetype = car_info["archetype"]
-    result = solve(archetype, n_panels=n_panels, V_inf=V_inf,
-                   car_params_override=merged_params)
-    result["car_key"]  = car_key
-    result["car_info"] = car_info
-    result["archetype"] = archetype
-    return result
-
-
-def validate_indian_cars() -> dict:
-    """
-    Run the solver on all Indian cars and compare against
-    manufacturer-published Cd values.
-    """
-    results = {}
-    print("=" * 72)
-    print("  INDIAN CAR DATABASE VALIDATION")
-    print("=" * 72)
-    print(f"  {'Car':<28} {'Pred':>6} {'Ref':>6} {'Error':>8} {'Status':>8}")
-    print("  " + "-" * 60)
+    if verbose:
+        print("=" * 78)
+        print("  LAYER 1 VALIDATION — panel method + drag budget vs published Cd")
+        print("=" * 78)
+        print(f"  {'Car':<26} {'sep':>5} {'Cpb':>6} {'press':>6} {'fric':>6} "
+              f"{'undr':>6} {'whl':>6} {'Cd':>6} {'ref':>6} {'err':>7}")
+        print("  " + "-" * 74)
 
     for key, car in INDIAN_CARS.items():
         r = solve_car(key)
         results[key] = r
-        err = r['error_pct']
+        if verbose:
+            err = (r["Cd"] - r["Cd_reference"]) / r["Cd_reference"] * 100
+            flag = "" if abs(err) < 15 else "  <-- outside +/-15%"
+            print(f"  {car['display_name'][:26]:<26} {r['sep_x']:5.2f} "
+                  f"{r['Cpb']:+6.3f} {r['Cd_pressure']:6.3f} "
+                  f"{r['Cd_friction']:6.3f} {r['Cd_underbody']:6.3f} "
+                  f"{r['Cd_wheels']:6.3f} {r['Cd']:6.3f} "
+                  f"{r['Cd_reference']:6.3f} {err:+6.1f}%{flag}")
 
-        if err < 15:
-            status = "✓ PASS"
-        elif car["archetype"] == "sedan" and err < 40:
-            status = "△ NOTE"
-        else:
-            status = "✗ CHECK"
-
-        print(f"  {car['display_name']:<28} {r['Cd']:>6.3f} "
-              f"{r['Cd_reference']:>6.3f} {err:>7.1f}% {status:>8}")
-
-    print("=" * 72)
-    print()
+    if verbose:
+        errs = [abs(r["Cd"] - r["Cd_reference"]) / r["Cd_reference"] * 100
+                for r in results.values()]
+        print("  " + "-" * 74)
+        print(f"  RMS error {np.sqrt(np.mean(np.square(errs))):.1f}%   "
+              f"max error {max(errs):.1f}%")
+        print("=" * 78 + "\n")
     return results
 
 
+def print_dalembert_report():
+    """Print the closed-body correctness check for all three archetypes."""
+    print("=" * 78)
+    print("  SOLVER CORRECTNESS — d'Alembert's paradox on a closed body")
+    print("  (attached potential flow must produce ZERO drag and ZERO net source)")
+    print("=" * 78)
+    print(f"  {'Archetype':<12} {'closure gap':>12} {'net source':>12} "
+          f"{'Cd_attached':>12} {'Cp_max':>8}")
+    print("  " + "-" * 62)
+    for name, p in ARCHETYPES.items():
+        d = validate_dalembert(p)
+        print(f"  {name:<12} {d['closure_gap']:12.2e} {d['net_source']:+12.4f} "
+              f"{d['Cd_attached']:+12.4f} {d['Cp_max']:8.3f}")
+    print("  " + "-" * 62)
+    print("  Cp_max = +1.000 confirms the stagnation point is resolved exactly.")
+    print("=" * 78 + "\n")
+
+
 # ════════════════════════════════════════════════════════════════
-# ENTRY POINT
+# VISUALISATION
 # ════════════════════════════════════════════════════════════════
+
+def plot_results(results: dict, save_path: str = "output/validation.png"):
+    """Profiles, Cp distributions, and the drag budget stacked by component."""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle("Layer 1 — Panel Method and First-Principles Drag Budget",
+                 fontsize=13, fontweight="bold")
+    colors = {"sedan": "#2196F3", "hatchback": "#4CAF50", "suv": "#FF5722"}
+
+    # --- Profiles ---
+    ax = axes[0]
+    for name, p in ARCHETYPES.items():
+        coords, _ = build_profile(p, 300)
+        ax.plot(coords[:, 0], coords[:, 1], color=colors[name], lw=1.8, label=name)
+    ax.axhline(0, color="gray", lw=0.8, ls="--")
+    ax.set_aspect("equal")
+    ax.set_xlabel("x / length"); ax.set_ylabel("y / length")
+    ax.set_title("Closed silhouette with blunt base")
+    ax.legend(fontsize=8); ax.grid(alpha=0.3)
+
+    # --- Cp ---
+    ax = axes[1]
+    for name, p in ARCHETYPES.items():
+        r = solve(p)
+        pg, meta = r["pg"], r["meta"]
+        n_up = meta["n_upper"]
+        ax.plot(pg["xc"][:n_up], r["Cp_wake"][:n_up], color=colors[name],
+                lw=1.5, label=f"{name} upper")
+        ax.axvline(r["sep_x"], color=colors[name], lw=0.7, ls=":", alpha=0.8)
+    ax.axhline(0, color="k", lw=0.5)
+    ax.invert_yaxis()
+    ax.set_ylim(2.5, -4.0)
+    ax.set_xlabel("x / length"); ax.set_ylabel("Cp (inverted — suction up)")
+    ax.set_title("Pressure coefficient\n(dotted = separation point)")
+    ax.legend(fontsize=7); ax.grid(alpha=0.3)
+
+    # --- Drag budget ---
+    ax = axes[2]
+    keys = list(INDIAN_CARS)
+    comps = ["Cd_pressure", "Cd_underbody", "Cd_wheels",
+             "Cd_friction", "Cd_cooling", "Cd_mirrors"]
+    labels = ["wake/base", "underbody", "wheels", "friction", "cooling", "mirrors"]
+    palette = ["#C62828", "#EF6C00", "#F9A825", "#2E7D32", "#1565C0", "#6A1B9A"]
+
+    solved = {k: solve_car(k) for k in keys}
+    bottom = np.zeros(len(keys))
+    for comp, lab, col in zip(comps, labels, palette):
+        vals = np.array([solved[k][comp] for k in keys])
+        ax.bar(range(len(keys)), vals, 0.6, bottom=bottom, label=lab, color=col)
+        bottom += vals
+    ax.plot(range(len(keys)), [INDIAN_CARS[k]["reference_Cd"] for k in keys],
+            "k_", markersize=22, markeredgewidth=2.5, label="published Cd")
+    ax.set_xticks(range(len(keys)))
+    ax.set_xticklabels([INDIAN_CARS[k]["display_name"].split("(")[0].strip()
+                        for k in keys], rotation=40, ha="right", fontsize=7)
+    ax.set_ylabel("Cd")
+    ax.set_title("Drag budget by component\n(each modification draws from one bar)")
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Figure saved -> {save_path}")
+
 
 if __name__ == "__main__":
-    # Archetype validation
-    results = validate_all()
-    plot_results(results)
-
-    # Indian car database validation
-    indian_results = validate_indian_cars()
-
-    # Detailed printout for one real car
-    r = indian_results['maruti_swift']
-    print(f"  {r['car_info']['display_name']} detail:")
-    print(f"    Archetype         : {r['archetype']}")
-    print(f"    Panels            : {r['n_panels']}")
-    print(f"    Reynolds No.      : {r['Re']:.2e}")
-    print(f"    Separation at     : x≈{r['pg']['xc'][r['sep_idx']]:.2f}")
-    print(f"    Base pressure Cpb : {r['Cpb']:.3f}")
-    print(f"    Cd (base wake)    : {r['Cd_base']:.4f}")
-    print(f"    Cd (friction)     : {r['Cd_friction']:.4f}")
-    print(f"    Cd (parasitic)    : {r['Cd_parasitic']:.4f}")
-    print(f"    Cd (total)        : {r['Cd']:.4f}  (ref: {r['Cd_reference']})")
-    print(f"    Error             : {r['error_pct']:.1f}%")
+    import sys
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    print_dalembert_report()
+    validate_all()

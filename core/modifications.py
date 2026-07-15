@@ -1,35 +1,146 @@
 """
-Layer 2: Aerodynamic Modification Physics Engine
+Layer 2: Aerodynamic Modification Physics
 Road Car Aerodynamic Fuel Efficiency Engine
-==============================================
+============================================
 
-Each modification is encoded as a physics-derived delta on the car's
-drag coefficient. The approach per modification:
+The rule this layer obeys
+-------------------------
+Every modification must subtract drag from a SPECIFIC, NAMED component of the
+Layer 1 budget, and it can never take more than that component contains.
 
-    1. Express the geometry change in terms the panel method understands
-       (change in angle, area, clearance, etc.)
-    2. Compute how that geometry change affects the dominant drag source
-       (base pressure, skin friction, or parasitic)
-    3. Apply physical feasibility constraints — the optimizer cannot
-       request a modification that would cause flow separation, structural
-       failure, or violate road legality
-    4. Return ΔCd, the physical explanation, and whether constraints were hit
+    wheel covers      ->  Cd_wheels
+    underbody panel   ->  Cd_underbody
+    side skirts       ->  Cd_underbody
+    front splitter    ->  Cd_underbody  (+ a small stagnation term)
+    rear diffuser     ->  Cd_pressure   (by raising the wake pressure Cpb)
+    rear spoiler      ->  Cd_pressure   (by raising Cpb, minus its own drag)
 
-Physics sources cited inline per modification.
+This is the discipline the previous version lacked. It computed Layer 1 drag as
+base + friction + parasitic, then had the modifications subtract from six other
+buckets that did not exist in that budget. Wheel covers removed Cd 0.024 from a
+parasitic allowance of 0.022, of which only 0.015 was wheels — fit the covers
+and the car's implied wheel drag went negative. A rear diffuser returned
+Cd 0.118, four to ten times the largest figure ever measured on a road car, and
+because it dominated everything else it won the optimiser for every car in the
+database. The headline results of the project were an artefact of that bug.
 
-Modification catalogue:
-    A. Rear spoiler      — controls separation point, reduces wake width
-    B. Front splitter    — shifts stagnation, reduces underbody flow
-    C. Underbody panel   — smooths turbulent underbody, reduces skin friction
-    D. Rear diffuser     — accelerates underbody air, reduces base pressure
-    E. Side skirts       — seals underbody from high-pressure sides
-    F. Wheel covers      — reduces rotating-wheel turbulence drag
+Now a modification physically cannot remove drag that the car does not have.
+
+State threading
+---------------
+apply_mod_set() carries a live budget. Each modification sees the budget left
+by the ones before it and writes back what it consumed. Two mods that both act
+on the wake pressure therefore compound correctly instead of both claiming the
+same improvement against the same untouched Cpb — which is what the old
+sequential loop did, because it reset Cpb from the pristine baseline on every
+iteration and only carried Cd forward.
+
+Every DeltaCd below is cross-checked against published wind-tunnel ranges in
+test/test_modifications.py. If a model drifts outside what has actually been
+measured on a real car, the test suite fails.
 """
 
 import numpy as np
-from dataclasses import dataclass
-from typing import Tuple, Optional
-from core.panel_solver import solve_car, solve, ARCHETYPES, INDIAN_CARS
+from dataclasses import dataclass, field
+from typing import Optional, List
+
+from core.panel_solver import (solve_car, INDIAN_CARS, K_ROUGH, K_3D,
+                               CD_WHEEL_LOCAL)
+
+
+# ════════════════════════════════════════════════════════════════
+# HARD PHYSICAL AND LEGAL LIMITS
+# ════════════════════════════════════════════════════════════════
+
+SPOILER_STALL_ANGLE_DEG = 15.0
+"""Above this the spoiler stalls: the flow separates off the spoiler itself and
+it becomes a drag device. Katz, "Race Car Aerodynamics" (1995)."""
+
+DIFFUSER_MAX_ANGLE_DEG = 7.0
+"""Above this the flow separates inside the diffuser and pressure recovery
+collapses to nothing. Senior & Zhang, SAE 2000-01-0354."""
+
+DIFFUSER_MIN_CLEARANCE_MM = 120.0
+"""Minimum ground clearance for a diffuser to be viable on Indian roads.
+
+NOT a statute. An earlier version of this file sourced this number to
+"CMVR Rule 95(1)" — a rule number that could not be verified against the primary
+source. A physics tool that invents a statute to justify a constraint is doing
+the exact thing this project claims not to do, so the citation is gone.
+
+The constraint itself survives, because it can be DERIVED. A standard Indian
+speed breaker is a 3.7 m x 0.10 m round-topped hump; a car straddling it must
+lift its belly by the sagitta of that arc over half a wheelbase, which is about
+45 mm, plus margin for suspension travel and for the many humps built to no
+standard at all. See core/compliance.py, which computes this per car from its
+wheelbase — geometry needs no citation to be true.
+
+120 mm is the working minimum below which a diffuser has nowhere to go.
+The STATUTORY position (Motor Vehicles Act s.52 — external body alterations
+require RTO endorsement) is handled separately in compliance.py, because it
+applies to the modification regardless of how much clearance the car has."""
+
+SPLITTER_MAX_DEPTH_MM = 80.0
+"""Structural limit for an unsupported splitter in road use."""
+
+SKIRT_MIN_GROUND_GAP_MM = 50.0
+"""Minimum skirt-to-ground gap: below this, road debris and speed breakers."""
+
+
+# ════════════════════════════════════════════════════════════════
+# MODIFICATION EFFECTIVENESS CONSTANTS
+#   Each is a fraction of a real, computed drag component.
+# ════════════════════════════════════════════════════════════════
+
+WHEEL_COVER_EFFECTIVENESS = 0.17
+"""A flush disc cover removes the spoke turbulence and the ventilation
+(pumping) drag of an open wheel, but not the wheel's bluff-body form drag or
+its contact-patch vortex. Cogotti (1983); consistent with the ~0.01 Cd gain
+measured on aero wheel covers for production EVs."""
+
+DIFFUSER_EFFICIENCY = 0.55
+DIFFUSER_EFFICIENCY_MAX = 0.75
+"""Fraction of the ideal Bernoulli pressure recovery a real diffuser achieves.
+The rest is lost to boundary-layer growth on the diffuser ramp.
+
+The MAX is a hard ceiling on the sum of the base value and the skirt/floor
+bonuses. Without it, a diffuser fitted behind both skirts and a flat floor
+climbed to eta = 0.81 — a better pressure recovery than a purpose-built
+wind-tunnel diffuser, on a road car with 190 mm of ground clearance."""
+
+DIFFUSER_ETA_SKIRT_BONUS = 0.10
+"""Skirts stop high-pressure side air spilling into the diffuser and destroying
+its spanwise pressure gradient, so the diffuser recovers more."""
+
+DIFFUSER_ETA_PANEL_BONUS = 0.06
+"""A smooth floor delivers a thinner boundary layer into the diffuser throat,
+which delays separation on the ramp and raises recovery."""
+
+SPOILER_TURNING_GAIN = 1.8
+"""Rise in Cpb per unit of (effective spoiler height / base height). The spoiler
+fixes the separation line and turns the shear layer inward, narrowing the wake.
+Hucho Fig 5.45."""
+
+SPOILER_PROFILE_CD = 0.35
+"""Drag coefficient of the spoiler's own projected frontal area. It is not a
+bluff plate in clean freestream — it sits in the decelerated flow at the roof
+trailing edge, which is why a well-sized lip can be a net win."""
+
+SPLITTER_UNDERBODY_GAIN = 0.25
+"""Underbody drag removed per unit of (splitter depth / ground clearance): the
+splitter deflects flow around the car instead of under it."""
+
+SPLITTER_STAG_CD = 0.004
+"""Front-face pressure benefit from lowering the stagnation point, at the
+reference depth of 50 mm. Hucho Fig 5.21."""
+
+SKIRT_SEAL_GAIN = 0.60
+"""Underbody drag removed per unit of (skirt height / ground clearance), capped
+below. Skirts seal the lateral pressure leak that drives the underbody edge
+vortices."""
+SKIRT_SEAL_MAX = 0.35
+"""A skirt can never remove more than this share of underbody drag — it does
+nothing about the exhaust, sump or suspension in the middle of the floor."""
 
 
 # ════════════════════════════════════════════════════════════════
@@ -38,840 +149,672 @@ from core.panel_solver import solve_car, solve, ARCHETYPES, INDIAN_CARS
 
 @dataclass
 class ModResult:
-    """
-    Output of applying one modification to one car.
-
-    All deltas are REDUCTIONS (positive = drag reduced = good).
-    ΔCd_total is what gets passed to the WLTP layer.
-    """
-    mod_name:        str
-    params_used:     dict          # geometric parameters of the modification
-    delta_Cd:        float         # drag reduction (positive = improvement)
-    delta_Cd_pct:    float         # as % of baseline Cd
-    constraint_hit:  Optional[str] # which constraint limited the result, if any
-    explanation:     str           # physics explanation of why this works
-    Cd_new:          float         # absolute Cd after modification
-    feasible:        bool          # False if modification violates hard limits
+    """Result of applying one modification. delta_Cd > 0 means drag went DOWN."""
+    mod_name: str
+    params_used: dict
+    delta_Cd: float
+    delta_Cd_pct: float
+    component: str                  # which budget line this drew from
+    constraint_hit: Optional[str]
+    explanation: str
+    Cd_new: float
+    feasible: bool
 
 
 @dataclass
 class ModSet:
-    """A combination of modifications applied together."""
-    modifications:   list          # list of ModResult
-    delta_Cd_total:  float         # combined drag reduction
-    Cd_final:        float         # final Cd after all modifications
-    interaction_note: str          # any interaction effects between mods
+    modifications: List[ModResult]
+    delta_Cd_total: float
+    Cd_final: float
+    interaction_note: str
+    budget_final: dict = field(default_factory=dict)
 
 
-# ════════════════════════════════════════════════════════════════
-# PHYSICAL CONSTANTS AND LIMITS
-# ════════════════════════════════════════════════════════════════
-
-# Hard physical limits — these are not arbitrary.
-# Exceeding them makes drag WORSE, not better.
-
-SPOILER_STALL_ANGLE_DEG   = 15.0   # flow separates off spoiler above this
-                                    # Source: Katz, "Race Car Aerodynamics" (1995)
-
-DIFFUSER_MAX_ANGLE_DEG    = 7.0    # underbody flow separates above this
-                                    # Source: Senior & Zhang, SAE 2000-01-0354
-
-DIFFUSER_MIN_CLEARANCE_MM = 120.0  # road legal ground clearance (India CMVR)
-                                    # Source: CMVR Rule 95(1)
-
-SPLITTER_MAX_DEPTH_MM     = 80.0   # structural limit for road use (empirical)
-SKIRT_MIN_CLEARANCE_MM    = 50.0   # minimum skirt-to-ground gap (road debris)
-
-RHO = 1.225   # kg/m³, standard atmosphere
-NU  = 1.5e-5  # m²/s, kinematic viscosity of air at 20°C
+def _infeasible(name, params, reason, Cd0) -> ModResult:
+    return ModResult(mod_name=name, params_used=params, delta_Cd=0.0,
+                     delta_Cd_pct=0.0, component="-", constraint_hit=reason,
+                     explanation=f"Not fitted: {reason}", Cd_new=Cd0,
+                     feasible=False)
 
 
-# ════════════════════════════════════════════════════════════════
-# A. REAR SPOILER
-# ════════════════════════════════════════════════════════════════
-
-def mod_rear_spoiler(baseline: dict,
-                     chord_m: float = 0.25,
-                     angle_deg: float = 8.0,
-                     span_fraction: float = 0.85) -> ModResult:
+def make_budget(baseline: dict) -> dict:
     """
-    Rear spoiler — reduces wake width by controlling separation point.
+    Extract the mutable drag budget from a Layer 1 solution.
 
-    Physics mechanism:
-        A spoiler at the roof trailing edge acts as a raised Kutta condition.
-        It forces the flow to leave the body cleanly at the spoiler tip
-        rather than separating gradually up the rear window. This raises the
-        effective separation point (moves it rearward), which:
-          1. Reduces the width of the separated wake
-          2. Increases base pressure (less negative Cpb)
-          3. Reduces base drag
-
-        The effect on Cpb is derived from the trailing edge Kutta condition:
-        imposing clean separation raises Cpb approximately as:
-            ΔCpb ≈ +0.08 × (chord/H_car) × cos(angle_rad)
-        (Calibrated from Hucho 1998, Fig 5.45 — spoiler height vs Cpb)
-
-        At angles above SPOILER_STALL_ANGLE_DEG, the spoiler itself
-        generates separated flow and INCREASES drag. This is the hard limit.
-
-    Args:
-        baseline      : result dict from solve_car() or solve()
-        chord_m       : spoiler chord length in metres (depth front-to-back)
-        angle_deg     : spoiler angle relative to horizontal flow
-        span_fraction : fraction of car width covered by spoiler (0–1)
-
-    Returns:
-        ModResult with ΔCd and explanation
+    This dict is what the modifications consume. Cd is always the sum of its
+    components, so it cannot drift away from them.
     """
-    params = baseline['params']
-    Cd0    = baseline['Cd']
-    Cpb0   = baseline['Cpb']
-    H_car  = params['height_m']
-    A_ref  = params['frontal_area_m2']
+    return {
+        "Cd_pressure":  baseline["Cd_pressure"],
+        "Cd_friction":  baseline["Cd_friction"],
+        "Cd_underbody": baseline["Cd_underbody"],
+        "Cd_wheels":    baseline["Cd_wheels"],
+        "Cd_cooling":   baseline["Cd_cooling"],
+        "Cd_mirrors":   baseline["Cd_mirrors"],
+        "Cpb":          baseline["Cpb"],
+        # The pristine base suction, so wake-acting mods can apply
+        # diminishing returns against what is actually left.
+        "Cpb_baseline": baseline["Cpb"],
+        "params":       baseline["params"],
+        "meta":         baseline["meta"],
+        "V_inf_ms":     baseline["V_inf_ms"],
+        # Set by mods that change the diffuser's operating environment.
+        "diffuser_eta_bonus": 0.0,
+    }
 
-    # ── Feasibility check ─────────────────────────────────────────
-    if angle_deg > SPOILER_STALL_ANGLE_DEG:
-        return ModResult(
-            mod_name="rear_spoiler",
-            params_used=dict(chord_m=chord_m, angle_deg=angle_deg,
-                             span_fraction=span_fraction),
-            delta_Cd=0.0, delta_Cd_pct=0.0,
-            constraint_hit=f"Angle {angle_deg}° exceeds stall limit "
-                           f"({SPOILER_STALL_ANGLE_DEG}°) — flow "
-                           f"separates off spoiler, drag increases",
-            explanation="Modification infeasible at this angle.",
-            Cd_new=Cd0, feasible=False
-        )
 
-    if chord_m <= 0 or span_fraction <= 0:
-        return ModResult("rear_spoiler", {}, 0.0, 0.0,
-                         "Non-positive geometry", "", Cd0, False)
+def budget_Cd(b: dict) -> float:
+    """Total Cd is the sum of the components. Always."""
+    return (b["Cd_pressure"] + b["Cd_friction"] + b["Cd_underbody"]
+            + b["Cd_wheels"] + b["Cd_cooling"] + b["Cd_mirrors"])
 
-    # ── ΔCpb from spoiler (Kutta condition model) ─────────────────
-    angle_rad  = np.radians(angle_deg)
-    h_ratio    = chord_m / H_car           # spoiler chord / car height
 
-    # Improvement in base pressure (less negative = less drag)
-    # Reference: Hucho "Aerodynamics of Road Vehicles" 4th ed., Fig 5.45
-    delta_Cpb = 0.08 * h_ratio * np.cos(angle_rad) * span_fraction
+def _base_sensitivity(b: dict) -> float:
+    """
+    dCd_pressure / dCpb — how much total drag falls per unit rise in wake pressure.
 
-    # New base pressure (less negative = less drag)
-    Cpb_new   = Cpb0 + delta_Cpb          # e.g. -0.28 → -0.24
+    The rear face contributes -Cpb * base_height to the surface pressure
+    integral, so differentiating the Layer 1 pressure-drag expression
 
-    # ── ΔCd_base ─────────────────────────────────────────────────
-    rwa_rad      = np.radians(params['rear_window_angle_deg'])
-    A_base_ratio = 0.30 + 0.65 * np.sin(rwa_rad)
+        Cd_pressure = K_3D * (-integral Cp n_x ds) * L * W_eff / A_ref
 
-    Cd_base_old  = abs(Cpb0)    * A_base_ratio
-    Cd_base_new  = abs(Cpb_new) * A_base_ratio
-    delta_Cd_base = Cd_base_old - Cd_base_new   # positive = improvement
+    with respect to Cpb over the base panels gives the factor below. Any mod
+    that raises Cpb converts through this number — the diffuser and the spoiler
+    both use it, so they share one consistent route into the drag budget.
+    """
+    p, m = b["params"], b["meta"]
+    W_eff = p["width_m"] * p.get("plan_taper", 0.86)
+    base_h_norm = m["base_height"]            # already normalised by length
+    return K_3D * base_h_norm * p["length_m"] * W_eff / p["frontal_area_m2"]
 
-    # ── Spoiler own drag (induced drag from lift on spoiler) ──────
-    # Spoiler acts as a small wing. Its drag penalty:
-    #   Cd_spoiler = Cl_spoiler² / (π × AR × e) × (A_spoiler / A_ref)
-    # For a flat plate: Cl ≈ 2π sin(α), AR = span/chord
-    A_spoiler_m2 = chord_m * params['width_m'] * span_fraction
-    Cl_spoiler   = 2 * np.pi * np.sin(angle_rad)
-    AR_spoiler   = (params['width_m'] * span_fraction) / chord_m
-    e_oswald     = 0.7   # Oswald efficiency for a short-span spoiler
-    Cd_spoiler_own = (Cl_spoiler**2 / (np.pi * AR_spoiler * e_oswald)
-                      * A_spoiler_m2 / A_ref)
 
-    delta_Cd = delta_Cd_base - Cd_spoiler_own
-    Cd_new   = max(Cd0 - delta_Cd, 0.05)
+def _suction_remaining(b: dict) -> float:
+    """
+    Fraction of the ORIGINAL base suction still left to recover, in [0, 1].
 
-    # ── Which constraint was binding? ─────────────────────────────
-    constraint = None
-    if angle_deg > 12:
-        constraint = f"Approaching stall limit ({SPOILER_STALL_ANGLE_DEG}°)"
+    Diminishing returns, and they are physical. A diffuser and a spoiler both
+    work by raising the wake pressure toward ambient. Once the diffuser has
+    already recovered part of that suction, the spoiler arrives to find less
+    left to take — it cannot recover pressure that is no longer missing.
 
-    explanation = (
-        f"Spoiler (chord {chord_m*1000:.0f}mm, angle {angle_deg:.1f}°) "
-        f"raises the effective separation point at the car's trailing edge. "
-        f"This increases base pressure from Cpb={Cpb0:.3f} to "
-        f"Cpb={Cpb_new:.3f} (less suction in wake), reducing base drag by "
-        f"ΔCd_base={delta_Cd_base:.4f}. The spoiler's own induced drag "
-        f"penalty is {Cd_spoiler_own:.4f}. "
-        f"Net drag reduction: ΔCd={delta_Cd:.4f} "
-        f"({delta_Cd/Cd0*100:.1f}% of baseline)."
-    )
-
-    return ModResult(
-        mod_name="rear_spoiler",
-        params_used=dict(chord_m=chord_m, angle_deg=angle_deg,
-                         span_fraction=span_fraction),
-        delta_Cd=delta_Cd,
-        delta_Cd_pct=delta_Cd / Cd0 * 100,
-        constraint_hit=constraint,
-        explanation=explanation,
-        Cd_new=Cd_new,
-        feasible=True
-    )
+    Without this, the two mods each computed their full ideal DeltaCpb against a
+    constant sensitivity and simply added. Stacking every modification at its
+    most aggressive legal setting then removed 31% of an SUV's drag, when a real
+    full aero package on a production car achieves 10-20%.
+    """
+    cpb0 = b.get("Cpb_baseline")
+    if not cpb0:
+        return 1.0
+    return float(np.clip(b["Cpb"] / cpb0, 0.0, 1.0))
 
 
 # ════════════════════════════════════════════════════════════════
-# B. FRONT SPLITTER
+# A. WHEEL COVERS  ->  Cd_wheels
 # ════════════════════════════════════════════════════════════════
 
-def mod_front_splitter(baseline: dict,
-                       depth_mm: float = 50.0,
-                       height_mm: float = 40.0) -> ModResult:
+def mod_wheel_covers(b: dict, n_wheels_covered: int = 4) -> ModResult:
     """
-    Front splitter — shifts stagnation point, reduces underbody mass flow.
+    Flush disc covers over the wheel faces.
 
-    Physics mechanism:
-        Without a splitter, the stagnation point sits at the car's nose,
-        and significant airflow is directed under the car (high dynamic
-        pressure under the body = increased underbody drag).
+    An open wheel loses energy three ways: bluff-body form drag, the vortex
+    system at the rotating contact patch, and the centrifugal pumping of air
+    out through the spokes. A cover kills the third and part of the first. It
+    cannot touch the contact patch, which is why the ceiling is a fraction of
+    wheel drag, not all of it.
 
-        A splitter is a horizontal plate extending forward from the front
-        bumper at near-ground level. It forces the stagnation point lower
-        and blocks high-pressure air from entering the underbody channel.
-
-        The drag reduction comes from two effects:
-          1. Reduced underbody mass flow → lower skin friction underneath
-          2. Raised front stagnation point → less adverse pressure gradient
-             on front bumper face
-
-        Model: underbody velocity reduction estimated from continuity.
-        Reduced underbody area (splitter blocks fraction of inlet height):
-            ΔV_underbody / V_∞ ≈ - depth_mm / (underbody_gap_mm × 2)
-        Reduced underbody Cf → ΔCd_friction (Prandtl formula, local Re)
-
-    Args:
-        baseline   : result dict from solve_car() or solve()
-        depth_mm   : how far splitter extends forward of bumper (mm)
-        height_mm  : vertical thickness of splitter plate (mm)
-
-    Returns:
-        ModResult with ΔCd and explanation
+    Draws from Cd_wheels, which Layer 1 computed from the car's actual wheel
+    frontal area. A car with small wheels has less to gain, and the model now
+    knows that.
     """
-    params = baseline['params']
-    Cd0    = baseline['Cd']
-    L_m    = params['length_m']
-    A_ref  = params['frontal_area_m2']
-    V_inf  = baseline['V_inf_ms']
-
-    # ── Feasibility ───────────────────────────────────────────────
-    if depth_mm > SPLITTER_MAX_DEPTH_MM:
-        return ModResult(
-            mod_name="front_splitter",
-            params_used=dict(depth_mm=depth_mm, height_mm=height_mm),
-            delta_Cd=0.0, delta_Cd_pct=0.0,
-            constraint_hit=f"Depth {depth_mm}mm exceeds road-use structural "
-                           f"limit ({SPLITTER_MAX_DEPTH_MM}mm)",
-            explanation="Modification infeasible at this depth.",
-            Cd_new=Cd0, feasible=False
-        )
-
-    # ── Underbody inlet height (ground clearance) ─────────────────
-    clearance_m = params['underbody_clearance_norm'] * params['height_m']
-    clearance_mm = clearance_m * 1000
-
-    # Fraction of underbody inlet blocked by splitter
-    block_fraction = min(height_mm / clearance_mm, 0.6)  # cap at 60% of gap
-
-    # Velocity reduction in underbody channel (continuity: A1V1 = A2V2)
-    # If inlet area reduced by block_fraction, underbody V increases
-    # (venturi effect). But this is at the INLET — behind the splitter,
-    # the channel is normal width, so total mass flow is reduced.
-    # Net effect: less total air under car.
-    underbody_flow_reduction = block_fraction * 0.5  # conservative 50% transfer
-
-    # ── ΔCd from reduced underbody skin friction ──────────────────
-    # Underbody wetted area ≈ L × width (flat underside assumption)
-    S_underbody_m2 = L_m * params['width_m']
-    Re_underbody   = V_inf * L_m / NU
-    Cf_underbody   = 0.074 / (Re_underbody ** 0.2)
-
-    Cd_underbody_0   = Cf_underbody * S_underbody_m2 / A_ref
-    delta_Cd_friction = Cd_underbody_0 * underbody_flow_reduction * 0.4
-    # × 0.4 because only part of friction drag is from underbody,
-    # and reduction is partial (continuity, not complete blockage)
-
-    # ── ΔCd from frontal stagnation pressure improvement ──────────
-    # Raising stagnation reduces adverse dp/dx on bumper face.
-    # Empirical: Hucho 1998, Fig 5.21 — splitter depth vs ΔCd.
-    # Fitted: ΔCd_stag ≈ 0.004 × (depth_mm / 50)^0.6
-    delta_Cd_stag = 0.004 * (depth_mm / 50.0) ** 0.6
-
-    delta_Cd = delta_Cd_friction + delta_Cd_stag
-    Cd_new   = max(Cd0 - delta_Cd, 0.05)
-
-    constraint = None
-    if depth_mm > 60:
-        constraint = "Approaching structural limit for road use"
-
-    explanation = (
-        f"Front splitter (depth {depth_mm:.0f}mm) blocks {block_fraction*100:.0f}% "
-        f"of underbody inlet height, reducing underbody mass flow. "
-        f"Lower underbody flow → reduced skin friction under car: "
-        f"ΔCd_friction={delta_Cd_friction:.4f}. "
-        f"Stagnation point raised on bumper face: ΔCd_stag={delta_Cd_stag:.4f}. "
-        f"Net drag reduction: ΔCd={delta_Cd:.4f} "
-        f"({delta_Cd/Cd0*100:.1f}% of baseline)."
-    )
-
-    return ModResult(
-        mod_name="front_splitter",
-        params_used=dict(depth_mm=depth_mm, height_mm=height_mm),
-        delta_Cd=delta_Cd,
-        delta_Cd_pct=delta_Cd / Cd0 * 100,
-        constraint_hit=constraint,
-        explanation=explanation,
-        Cd_new=Cd_new,
-        feasible=True
-    )
-
-
-# ════════════════════════════════════════════════════════════════
-# C. UNDERBODY PANEL
-# ════════════════════════════════════════════════════════════════
-
-def mod_underbody_panel(baseline: dict,
-                        coverage_fraction: float = 0.70) -> ModResult:
-    """
-    Underbody panel — smooths turbulent underbody flow, reduces skin friction.
-
-    Physics mechanism:
-        A road car's underbody is highly irregular — engine sumps, exhaust
-        pipes, suspension components, fuel tanks all protrude downward.
-        Each protrusion creates a local separated flow region with high
-        skin friction and form drag. Flat underbody panels cover these
-        components, creating a smooth surface.
-
-        The drag reduction is dominated by two effects:
-          1. Elimination of form drag from protruding components
-             (each protrusion approximated as a bluff body: Cd_protrusion ≈ 1.0
-             × projected area × local dynamic pressure)
-          2. Reduction in turbulent skin friction from rough surface to smooth
-
-        Reference: Hucho (1998), Chapter 4 — underbody contribution to total
-        drag is typically 10–15% of Cd for an unpaneled road car.
-        SAE 2003-01-0655 (Gilliéron & Kourta) quantifies underbody drag
-        on production vehicles: 0.025–0.045 Cd units savings with full panels.
-
-    Args:
-        baseline            : result dict from solve_car() or solve()
-        coverage_fraction   : fraction of underbody area covered (0–1)
-                              0.7 = typical partial panel (engine + gearbox)
-                              1.0 = full flat underbody (rare on road cars)
-
-    Returns:
-        ModResult with ΔCd and explanation
-    """
-    params = baseline['params']
-    Cd0    = baseline['Cd']
-
-    coverage_fraction = np.clip(coverage_fraction, 0.0, 1.0)
-
-    # ── Underbody drag contribution (pre-modification) ────────────
-    # From SAE 2003-01-0655: underbody = 12% of total Cd for typical car.
-    # This includes both skin friction and protrusion form drag.
-    underbody_Cd_fraction = 0.12   # 12% of total Cd is from underbody
-    Cd_underbody_baseline  = Cd0 * underbody_Cd_fraction
-
-    # Panel removes the form drag component (protrusions).
-    # Smooth panel retains only skin friction (about 35% of underbody drag).
-    # So effective removal = 65% of underbody drag × coverage.
-    protrusion_fraction    = 0.65
-    delta_Cd = (Cd_underbody_baseline * protrusion_fraction
-                * coverage_fraction)
-
-    Cd_new = max(Cd0 - delta_Cd, 0.05)
-
-    # ── Additional check: clearance ───────────────────────────────
-    clearance_mm = (params['underbody_clearance_norm']
-                    * params['height_m'] * 1000)
-    constraint = None
-    if clearance_mm < DIFFUSER_MIN_CLEARANCE_MM:
-        constraint = (f"Ground clearance {clearance_mm:.0f}mm is already "
-                      f"below recommended minimum for paneling "
-                      f"({DIFFUSER_MIN_CLEARANCE_MM}mm)")
-
-    explanation = (
-        f"Underbody panel covering {coverage_fraction*100:.0f}% of floor area. "
-        f"Smooth panel eliminates form drag from engine/exhaust protrusions "
-        f"(≈{protrusion_fraction*100:.0f}% of underbody drag) and reduces "
-        f"skin friction on covered section. "
-        f"Underbody drag is ≈{underbody_Cd_fraction*100:.0f}% of total Cd "
-        f"(SAE 2003-01-0655), giving ΔCd={delta_Cd:.4f} "
-        f"({delta_Cd/Cd0*100:.1f}% of baseline). "
-        f"This is the highest return-on-simplicity modification — no moving "
-        f"parts, no angle tuning required."
-    )
-
-    return ModResult(
-        mod_name="underbody_panel",
-        params_used=dict(coverage_fraction=coverage_fraction),
-        delta_Cd=delta_Cd,
-        delta_Cd_pct=delta_Cd / Cd0 * 100,
-        constraint_hit=constraint,
-        explanation=explanation,
-        Cd_new=Cd_new,
-        feasible=True
-    )
-
-
-# ════════════════════════════════════════════════════════════════
-# D. REAR DIFFUSER
-# ════════════════════════════════════════════════════════════════
-
-def mod_rear_diffuser(baseline: dict,
-                      angle_deg: float = 5.0,
-                      length_norm: float = 0.12) -> ModResult:
-    """
-    Rear diffuser — accelerates underbody air, reduces base pressure drag.
-
-    Physics mechanism:
-        A diffuser is a diverging duct at the rear of the underbody.
-        By expanding the duct cross-section, it decelerates the underbody
-        airflow and recovers static pressure (Bernoulli).
-
-        The key physics: if underbody air exits at near-ambient pressure
-        (rather than low pressure), the pressure difference between the
-        underbody and the wake is reduced. This reduces the suction in the
-        separated wake (raises Cpb), directly reducing base drag.
-
-        Energy recovery model (from continuity + Bernoulli):
-            Area ratio: AR = A_exit / A_inlet = 1 + 2 × length × tan(θ)
-            Exit velocity: V_exit = V_inlet / AR   (continuity)
-            Pressure recovery: ΔCp_recovery = 1 - (1/AR)²  (Bernoulli)
-
-        Constraint: flow separates inside diffuser if angle > ~7°
-        (Senior & Zhang, SAE 2000-01-0354 — the definitive reference).
-
-    Args:
-        baseline    : result dict from solve_car() or solve()
-        angle_deg   : diffuser expansion half-angle (degrees)
-        length_norm : diffuser length as fraction of car length
-
-    Returns:
-        ModResult with ΔCd and explanation
-    """
-    params = baseline['params']
-    Cd0    = baseline['Cd']
-    Cpb0   = baseline['Cpb']
-    H_car  = params['height_m']
-
-    # ── Feasibility ───────────────────────────────────────────────
-    clearance_m  = params['underbody_clearance_norm'] * H_car
-    clearance_mm = clearance_m * 1000
-
-    if angle_deg > DIFFUSER_MAX_ANGLE_DEG:
-        return ModResult(
-            mod_name="rear_diffuser",
-            params_used=dict(angle_deg=angle_deg, length_norm=length_norm),
-            delta_Cd=0.0, delta_Cd_pct=0.0,
-            constraint_hit=(f"Angle {angle_deg}° exceeds separation limit "
-                            f"({DIFFUSER_MAX_ANGLE_DEG}°). Flow separates "
-                            f"inside diffuser, eliminating pressure recovery."),
-            explanation="Modification infeasible at this angle.",
-            Cd_new=Cd0, feasible=False
-        )
-
-    if clearance_mm < DIFFUSER_MIN_CLEARANCE_MM:
-        return ModResult(
-            mod_name="rear_diffuser",
-            params_used=dict(angle_deg=angle_deg, length_norm=length_norm),
-            delta_Cd=0.0, delta_Cd_pct=0.0,
-            constraint_hit=(f"Ground clearance {clearance_mm:.0f}mm below "
-                            f"CMVR minimum ({DIFFUSER_MIN_CLEARANCE_MM}mm)"),
-            explanation="Insufficient ground clearance for diffuser.",
-            Cd_new=Cd0, feasible=False
-        )
-
-    # ── Area ratio and pressure recovery ─────────────────────────
-    L_diffuser_m = length_norm * params['length_m']
-    angle_rad    = np.radians(angle_deg)
-
-    # Diffuser height rises from clearance_m by angle over length
-    h_exit = clearance_m + L_diffuser_m * np.tan(angle_rad)
-    AR     = h_exit / clearance_m     # area ratio (2D; width constant)
-
-    # Pressure recovery coefficient (Bernoulli, ideal):
-    # Cp_recovery = 1 - (1/AR)²
-    Cp_recovery_ideal = 1.0 - (1.0 / AR) ** 2
-
-    # Real diffusers recover about 60–70% of ideal (boundary layer losses)
-    diffuser_efficiency = 0.65
-    Cp_recovery = Cp_recovery_ideal * diffuser_efficiency
-
-    # ── Effect on base pressure and Cd ───────────────────────────
-    # Higher underbody exit pressure → less negative Cpb in wake
-    # Empirical coupling factor (fraction of Cp_recovery that improves Cpb):
-    # Reference: Zhang et al., SAE 2006-01-0337 — diffuser-wake interaction
-    coupling = 0.40
-    delta_Cpb = Cp_recovery * coupling
-
-    Cpb_new  = Cpb0 + delta_Cpb
-    rwa_rad  = np.radians(params['rear_window_angle_deg'])
-    A_base_r = 0.30 + 0.65 * np.sin(rwa_rad)
-
-    Cd_base_old = abs(Cpb0)    * A_base_r
-    Cd_base_new = abs(Cpb_new) * A_base_r
-    delta_Cd    = Cd_base_old - Cd_base_new
-    Cd_new      = max(Cd0 - delta_Cd, 0.05)
-
-    constraint = None
-    if angle_deg > 5.5:
-        constraint = f"Approaching separation limit ({DIFFUSER_MAX_ANGLE_DEG}°)"
-
-    explanation = (
-        f"Rear diffuser: angle {angle_deg:.1f}°, length "
-        f"{L_diffuser_m*1000:.0f}mm. "
-        f"Area ratio AR={AR:.2f} — underbody air decelerates from inlet "
-        f"to exit, recovering Cp_recovery={Cp_recovery:.3f} (ideal × "
-        f"{diffuser_efficiency} efficiency). "
-        f"This raises base pressure from Cpb={Cpb0:.3f} to "
-        f"Cpb={Cpb_new:.3f}, reducing base drag by ΔCd={delta_Cd:.4f} "
-        f"({delta_Cd/Cd0*100:.1f}% of baseline). "
-        f"Physics: Bernoulli pressure recovery in diverging duct "
-        f"(Senior & Zhang, SAE 2000-01-0354)."
-    )
-
-    return ModResult(
-        mod_name="rear_diffuser",
-        params_used=dict(angle_deg=angle_deg, length_norm=length_norm),
-        delta_Cd=delta_Cd,
-        delta_Cd_pct=delta_Cd / Cd0 * 100,
-        constraint_hit=constraint,
-        explanation=explanation,
-        Cd_new=Cd_new,
-        feasible=True
-    )
-
-
-# ════════════════════════════════════════════════════════════════
-# E. SIDE SKIRTS
-# ════════════════════════════════════════════════════════════════
-
-def mod_side_skirts(baseline: dict,
-                    height_mm: float = 60.0,
-                    coverage_fraction: float = 0.75) -> ModResult:
-    """
-    Side skirts — seal underbody from high-pressure side flow.
-
-    Physics mechanism:
-        Car sides are at high pressure (near stagnation). The underbody
-        is at low pressure (high-speed flow). Without skirts, air
-        constantly spills from the sides under the car, creating:
-          1. Spanwise vortices along the underbody edges
-          2. Additional turbulence mixing (viscous dissipation → drag)
-          3. Disruption of any diffuser action at the rear
-
-        Skirts seal this pressure differential. The drag reduction
-        is modelled as eliminating the vortex-induced drag from the
-        underbody edge vortices.
-
-        Vortex drag model:
-            Each underbody edge vortex has an effective circulation Γ.
-            The side pressure differential drives Γ:
-                Γ ≈ ΔCp_side × V_inf × h_skirt
-            Induced drag from one vortex pair:
-                Cd_vortex = Γ² / (π × V_inf² × b²) × (A_vortex / A_ref)
-            where b = car width.
-
-    Args:
-        baseline            : result dict from solve_car() or solve()
-        height_mm           : skirt depth below car sill (mm)
-        coverage_fraction   : fraction of wheelbase length covered
-
-    Returns:
-        ModResult with ΔCd and explanation
-    """
-    params = baseline['params']
-    Cd0    = baseline['Cd']
-    V_inf  = baseline['V_inf_ms']
-
-    height_m   = height_mm / 1000.0
-    clearance_m = params['underbody_clearance_norm'] * params['height_m']
-
-    # ── Feasibility ───────────────────────────────────────────────
-    clearance_mm = clearance_m * 1000
-    gap_mm = clearance_mm - height_mm
-    if gap_mm < SKIRT_MIN_CLEARANCE_MM:
-        return ModResult(
-            mod_name="side_skirts",
-            params_used=dict(height_mm=height_mm,
-                             coverage_fraction=coverage_fraction),
-            delta_Cd=0.0, delta_Cd_pct=0.0,
-            constraint_hit=(f"Skirt height {height_mm}mm leaves only "
-                            f"{gap_mm:.0f}mm ground clearance — below "
-                            f"minimum {SKIRT_MIN_CLEARANCE_MM}mm for road "
-                            f"debris safety"),
-            explanation="Modification infeasible at this height.",
-            Cd_new=Cd0, feasible=False
-        )
-
-    # ── Vortex drag calculation ────────────────────────────────────
-    # Side pressure coefficient (stagnation region at B-pillar area)
-    # Cp_side ≈ 0.3 for typical road car
-    Cp_side_diff   = 0.30
-
-    # Circulation of underbody edge vortex (per unit span):
-    Gamma = Cp_side_diff * V_inf * height_m
-
-    # Car width (span for vortex calculation)
-    b_m = params['width_m']
-    A_ref = params['frontal_area_m2']
-
-    # Induced drag of two symmetric vortices at underbody edges
-    # Simplified lifting-line analogy for ground vortex pair
-    Cd_vortex_pair = (2 * Gamma**2 / (np.pi * V_inf**2 * b_m**2)
-                      * (b_m * params['length_m'] / A_ref))
-
-    # Skirts eliminate this vortex drag proportional to coverage
-    delta_Cd = Cd_vortex_pair * coverage_fraction
-    Cd_new   = max(Cd0 - delta_Cd, 0.05)
-
-    explanation = (
-        f"Side skirts ({height_mm:.0f}mm deep, {coverage_fraction*100:.0f}% "
-        f"wheelbase coverage) seal the pressure differential between car "
-        f"sides (Cp≈+0.30) and underbody (low pressure). "
-        f"Without skirts, this drives underbody edge vortices with "
-        f"circulation Γ={Gamma:.2f} m²/s. Skirts eliminate these vortices, "
-        f"removing their induced drag: ΔCd={delta_Cd:.4f} "
-        f"({delta_Cd/Cd0*100:.1f}% of baseline)."
-    )
-
-    return ModResult(
-        mod_name="side_skirts",
-        params_used=dict(height_mm=height_mm,
-                         coverage_fraction=coverage_fraction),
-        delta_Cd=delta_Cd,
-        delta_Cd_pct=delta_Cd / Cd0 * 100,
-        constraint_hit=None,
-        explanation=explanation,
-        Cd_new=Cd_new,
-        feasible=True
-    )
-
-
-# ════════════════════════════════════════════════════════════════
-# F. WHEEL COVERS
-# ════════════════════════════════════════════════════════════════
-
-def mod_wheel_covers(baseline: dict,
-                     n_wheels_covered: int = 4) -> ModResult:
-    """
-    Wheel covers — reduce rotating-wheel turbulence drag.
-
-    Physics mechanism:
-        An exposed rotating wheel is a highly complex aerodynamic body.
-        It contributes drag through:
-          1. Bluff body form drag (wheel face into flow)
-          2. Rotating contact patch vortices (wheel-ground junction)
-          3. Spanwise flow ejected centrifugally from tire tread
-
-        Wheel covers (flat disc covers over the wheel face) eliminate
-        the form drag and much of the rotating surface turbulence.
-
-        Each wheel contributes approximately Cd_wheel ≈ 0.007–0.012
-        to the total vehicle Cd (Hucho 1998, Chapter 7; Cogotti 1983
-        "Aerodynamic characteristics of car wheels").
-
-        Covered vs open: reduction of ≈60% of wheel drag contribution.
-        (Aerodynamically smooth wheels like Tesla Model 3 Aero demonstrate
-        this: +0.025 Cd improvement from aero wheel covers, SAE 2019.)
-
-    Args:
-        baseline          : result dict from solve_car() or solve()
-        n_wheels_covered  : number of wheels fitted with covers (1–4)
-
-    Returns:
-        ModResult with ΔCd and explanation
-    """
-    params = baseline['params']
-    Cd0    = baseline['Cd']
-
-    n_wheels_covered = int(np.clip(n_wheels_covered, 0, 4))
-
-    # Wheel drag per wheel (Cogotti 1983, Hucho 1998 Table 7.2)
-    Cd_per_wheel_open     = 0.009   # typical road car wheel, open
-    Cd_per_wheel_covered  = 0.003   # smooth disc cover (60% reduction)
-    delta_per_wheel       = Cd_per_wheel_open - Cd_per_wheel_covered
-
-    # Total saving
-    delta_Cd = delta_per_wheel * n_wheels_covered
-    Cd_new   = max(Cd0 - delta_Cd, 0.05)
-
-    explanation = (
-        f"{n_wheels_covered} wheel cover(s) fitted. "
-        f"Each open wheel contributes Cd≈{Cd_per_wheel_open:.3f} via "
-        f"rotating bluff-body drag and contact-patch vortices "
-        f"(Cogotti 1983). A flush disc cover reduces this to "
-        f"Cd≈{Cd_per_wheel_covered:.3f} — eliminating spoke turbulence "
-        f"and most rotating-face form drag. "
-        f"Total saving: ΔCd={delta_Cd:.4f} "
-        f"({delta_Cd/Cd0*100:.1f}% of baseline). "
-        f"Note: rear wheel covers have diminishing returns on cars "
-        f"with rear wheel arch fairings already fitted."
-    )
+    Cd0 = budget_Cd(b)
+    n = int(np.clip(n_wheels_covered, 0, 4))
+    if n == 0:
+        return _infeasible("wheel_covers", dict(n_wheels_covered=0),
+                           "No wheels covered", Cd0)
+
+    available = b["Cd_wheels"]
+    delta = available * WHEEL_COVER_EFFECTIVENESS * (n / 4.0)
+
+    b["Cd_wheels"] = available - delta
+    Cd_new = budget_Cd(b)
 
     return ModResult(
         mod_name="wheel_covers",
-        params_used=dict(n_wheels_covered=n_wheels_covered),
-        delta_Cd=delta_Cd,
-        delta_Cd_pct=delta_Cd / Cd0 * 100,
+        params_used=dict(n_wheels_covered=n),
+        delta_Cd=delta, delta_Cd_pct=delta / Cd0 * 100,
+        component="Cd_wheels",
         constraint_hit=None,
-        explanation=explanation,
-        Cd_new=Cd_new,
-        feasible=True
-    )
+        explanation=(
+            f"{n} flush wheel cover(s). The car's four wheels contribute "
+            f"Cd={available:.4f}, computed from their frontal area "
+            f"(Cd_local={CD_WHEEL_LOCAL} per wheel). Covers remove the spoke "
+            f"turbulence and ventilation drag — "
+            f"{WHEEL_COVER_EFFECTIVENESS*100:.0f}% of wheel drag — but not the "
+            f"contact-patch vortex. DeltaCd={delta:.4f} "
+            f"({delta/Cd0*100:.1f}% of baseline)."),
+        Cd_new=Cd_new, feasible=True)
 
 
 # ════════════════════════════════════════════════════════════════
-# COMBINED MODIFICATION SET
+# B. UNDERBODY PANEL  ->  Cd_underbody
 # ════════════════════════════════════════════════════════════════
+
+def mod_underbody_panel(b: dict, coverage_fraction: float = 0.70) -> ModResult:
+    """
+    Flat panels covering the exhaust, sump, subframes and suspension.
+
+    Layer 1 modelled the underbody as a rough channel with K_ROUGH times the
+    drag of a smooth flat plate. A panel does one thing: it turns the covered
+    fraction back into a smooth flat plate. So the drag removed is exactly the
+    roughness excess over the covered area,
+
+        DeltaCd = Cd_underbody * coverage * (1 - 1/K_ROUGH)
+
+    which is derived from the Layer 1 model rather than asserted. Full coverage
+    cannot remove all underbody drag, because a smooth floor still has skin
+    friction. The old model asserted underbody drag was "12% of total Cd" — a
+    number with no connection to the car's actual floor.
+    """
+    Cd0 = budget_Cd(b)
+    cov = float(np.clip(coverage_fraction, 0.0, 1.0))
+    if cov <= 0:
+        return _infeasible("underbody_panel", dict(coverage_fraction=cov),
+                           "Zero coverage", Cd0)
+
+    available = b["Cd_underbody"]
+    roughness_excess = 1.0 - 1.0 / K_ROUGH        # share of underbody drag that
+    delta = available * cov * roughness_excess    # is roughness, not friction
+
+    b["Cd_underbody"] = available - delta
+    Cd_new = budget_Cd(b)
+
+    return ModResult(
+        mod_name="underbody_panel",
+        params_used=dict(coverage_fraction=cov),
+        delta_Cd=delta, delta_Cd_pct=delta / Cd0 * 100,
+        component="Cd_underbody",
+        constraint_hit=None,
+        explanation=(
+            f"Flat panel over {cov*100:.0f}% of the floor. The rough underbody "
+            f"carries Cd={available:.4f}, of which "
+            f"{roughness_excess*100:.0f}% is roughness excess over a smooth "
+            f"plate (K_ROUGH={K_ROUGH}); the remainder is irreducible skin "
+            f"friction that a panel cannot remove. DeltaCd={delta:.4f} "
+            f"({delta/Cd0*100:.1f}%). No moving parts, no angle to tune — the "
+            f"highest return on effort of any modification here."),
+        Cd_new=Cd_new, feasible=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# C. REAR DIFFUSER  ->  Cd_pressure (via Cpb)
+# ════════════════════════════════════════════════════════════════
+
+def mod_rear_diffuser(b: dict, angle_deg: float = 5.0,
+                      length_norm: float = 0.12) -> ModResult:
+    """
+    Diverging ramp at the rear of the underbody.
+
+    Physics, in order:
+      1. Continuity + Bernoulli in the diverging duct. Area ratio AR gives an
+         ideal static-pressure recovery of  Cp_rec = 1 - 1/AR^2.
+      2. Real recovery is a fraction of that, lost to boundary-layer growth
+         on the ramp (DIFFUSER_EFFICIENCY).
+      3. THE TERM THE OLD MODEL MISSED. That recovered pressure only reaches
+         the part of the base that the underbody stream actually feeds — a
+         band of height h_exit at the bottom of the rear face. The rest of the
+         base is fed by the flow off the roof and the sides, which the diffuser
+         never touches. So the improvement in base pressure is weighted by
+         f_base = h_exit / base_height, which is typically 0.15-0.25.
+
+         The old code applied the full duct recovery to the entire base and
+         got DeltaCd = 0.118 — a 38% drag reduction from one bolt-on part,
+         which is why it won every optimisation in the project.
+      4. The resulting rise in Cpb converts to drag through _base_sensitivity().
+    """
+    Cd0 = budget_Cd(b)
+    p, m = b["params"], b["meta"]
+    params_used = dict(angle_deg=angle_deg, length_norm=length_norm)
+
+    clearance_m = p["underbody_clearance_norm"] * p["height_m"]
+    clearance_mm = clearance_m * 1000.0
+
+    if angle_deg > DIFFUSER_MAX_ANGLE_DEG:
+        return _infeasible("rear_diffuser", params_used,
+                           f"Angle {angle_deg} deg exceeds the "
+                           f"{DIFFUSER_MAX_ANGLE_DEG} deg separation limit — "
+                           f"flow detaches inside the diffuser and recovery "
+                           f"collapses", Cd0)
+    if clearance_mm < DIFFUSER_MIN_CLEARANCE_MM:
+        return _infeasible("rear_diffuser", params_used,
+                           f"Ground clearance {clearance_mm:.0f}mm is below the "
+                           f"workable minimum ({DIFFUSER_MIN_CLEARANCE_MM:.0f}mm) "
+                           f"— a diffuser here would ground on speed breakers",
+                           Cd0)
+
+    # 1. Duct geometry
+    L_diff = length_norm * p["length_m"]
+    h_exit = clearance_m + L_diff * np.tan(np.radians(angle_deg))
+    AR = h_exit / clearance_m
+
+    # 2. Ideal recovery, degraded by boundary-layer losses
+    Cp_rec_ideal = 1.0 - (1.0 / AR) ** 2
+    eta = DIFFUSER_EFFICIENCY + b.get("diffuser_eta_bonus", 0.0)
+    eta = float(np.clip(eta, 0.0, DIFFUSER_EFFICIENCY_MAX))
+    Cp_rec = Cp_rec_ideal * eta
+
+    # 3. Only the underbody-fed band of the base sees that recovery
+    base_height_m = m["base_height"] * p["length_m"]
+    f_base = float(np.clip(h_exit / base_height_m, 0.0, 1.0))
+
+    delta_Cpb = Cp_rec * f_base * _suction_remaining(b)
+
+    # 4. Convert to drag
+    sens = _base_sensitivity(b)
+    delta = delta_Cpb * sens
+
+    # A diffuser cannot push the wake above ambient.
+    Cpb_new = min(b["Cpb"] + delta_Cpb, -0.02)
+    delta = min(delta, b["Cd_pressure"])
+
+    b["Cpb"] = Cpb_new
+    b["Cd_pressure"] -= delta
+    Cd_new = budget_Cd(b)
+
+    constraint = (f"Approaching the {DIFFUSER_MAX_ANGLE_DEG} deg separation limit"
+                  if angle_deg > 5.5 else None)
+
+    return ModResult(
+        mod_name="rear_diffuser",
+        params_used=params_used,
+        delta_Cd=delta, delta_Cd_pct=delta / Cd0 * 100,
+        component="Cd_pressure",
+        constraint_hit=constraint,
+        explanation=(
+            f"Diffuser {angle_deg:.1f} deg over {L_diff*1000:.0f}mm. Area ratio "
+            f"AR={AR:.2f} gives an ideal recovery of {Cp_rec_ideal:.3f}, times "
+            f"{eta:.2f} efficiency = {Cp_rec:.3f}. That recovery only reaches "
+            f"the {h_exit*1000:.0f}mm band of the {base_height_m*1000:.0f}mm "
+            f"base fed by the underbody stream, so it is weighted by "
+            f"f_base={f_base:.2f}. Wake pressure rises "
+            f"Cpb={b['Cpb']-delta_Cpb:+.3f} -> {Cpb_new:+.3f}, giving "
+            f"DeltaCd={delta:.4f} ({delta/Cd0*100:.1f}%)."),
+        Cd_new=Cd_new, feasible=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# D. REAR SPOILER  ->  Cd_pressure (via Cpb), minus its own drag
+# ════════════════════════════════════════════════════════════════
+
+def mod_rear_spoiler(b: dict, chord_m: float = 0.20, angle_deg: float = 7.0,
+                     span_fraction: float = 0.85) -> ModResult:
+    """
+    Lip spoiler at the roof / tailgate trailing edge.
+
+    Benefit: it pins the separation line at a known place and turns the shear
+    layer inward, so the wake closes faster and the base pressure rises. The
+    effective turning height is chord*sin(angle) and what matters is that height
+    relative to the base it is trying to close.
+
+    Cost: the spoiler puts its own projected area into the flow.
+
+    The net can go either way, and that is the physically correct answer — a
+    spoiler helps a bluff-backed hatchback and hurts an already-clean shape.
+    The old model got this wrong in a different way: it charged the spoiler the
+    INDUCED drag of a lifting wing (Cl = 2*pi*sin(alpha)), which made the net
+    negative for every car and every setting, so no spoiler was ever selected
+    anywhere in the project.
+    """
+    Cd0 = budget_Cd(b)
+    p, m = b["params"], b["meta"]
+    params_used = dict(chord_m=chord_m, angle_deg=angle_deg,
+                       span_fraction=span_fraction)
+
+    if angle_deg > SPOILER_STALL_ANGLE_DEG:
+        return _infeasible("rear_spoiler", params_used,
+                           f"Angle {angle_deg} deg is past the "
+                           f"{SPOILER_STALL_ANGLE_DEG} deg stall limit — the "
+                           f"spoiler separates and becomes a drag device", Cd0)
+    if chord_m <= 0 or span_fraction <= 0:
+        return _infeasible("rear_spoiler", params_used,
+                           "Non-positive geometry", Cd0)
+
+    base_height_m = m["base_height"] * p["length_m"]
+    h_eff = chord_m * np.sin(np.radians(angle_deg))     # flow-turning height
+
+    # Benefit: base pressure rises with turning height relative to base height
+    delta_Cpb = (SPOILER_TURNING_GAIN * (h_eff / base_height_m) * span_fraction
+                 * _suction_remaining(b))
+    sens = _base_sensitivity(b)
+    gain = delta_Cpb * sens
+
+    # Cost: the spoiler's own projected frontal area
+    A_proj = h_eff * p["width_m"] * span_fraction
+    cost = SPOILER_PROFILE_CD * A_proj / p["frontal_area_m2"]
+
+    delta = gain - cost
+
+    Cpb_new = min(b["Cpb"] + delta_Cpb, -0.02)
+    b["Cpb"] = Cpb_new
+    # Net effect lands on the pressure budget; a negative delta raises it.
+    b["Cd_pressure"] = max(b["Cd_pressure"] - delta, 0.0)
+    Cd_new = budget_Cd(b)
+
+    constraint = (f"Approaching the {SPOILER_STALL_ANGLE_DEG} deg stall limit"
+                  if angle_deg > 12 else None)
+
+    verdict = "net gain" if delta > 0 else "NET LOSS — this spoiler adds drag"
+    return ModResult(
+        mod_name="rear_spoiler",
+        params_used=params_used,
+        delta_Cd=delta, delta_Cd_pct=delta / Cd0 * 100,
+        component="Cd_pressure",
+        constraint_hit=constraint,
+        explanation=(
+            f"Lip spoiler, {chord_m*1000:.0f}mm chord at {angle_deg:.1f} deg. "
+            f"Effective turning height {h_eff*1000:.0f}mm against a "
+            f"{base_height_m*1000:.0f}mm base raises the wake pressure by "
+            f"{delta_Cpb:.3f}, worth DeltaCd={gain:.4f}. Its own projected area "
+            f"({A_proj*1e4:.0f} cm^2) costs {cost:.4f}. Net {delta:+.4f} "
+            f"({delta/Cd0*100:+.1f}%) — {verdict}."),
+        Cd_new=Cd_new, feasible=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# E. FRONT SPLITTER  ->  Cd_underbody (+ stagnation term)
+# ════════════════════════════════════════════════════════════════
+
+def mod_front_splitter(b: dict, depth_mm: float = 50.0,
+                       height_mm: float = 40.0) -> ModResult:
+    """
+    Horizontal blade projecting forward at the bottom of the front bumper.
+
+    It lowers the front stagnation point and deflects air around the car rather
+    than under it. Less mass flow through the underbody channel means less
+    underbody drag — so the benefit is proportional to how much underbody drag
+    the car has left, and it shrinks if a floor panel has already been fitted.
+    A small extra term comes from the reduced pressure on the bumper's lower face.
+    """
+    Cd0 = budget_Cd(b)
+    p = b["params"]
+    params_used = dict(depth_mm=depth_mm, height_mm=height_mm)
+
+    if depth_mm > SPLITTER_MAX_DEPTH_MM:
+        return _infeasible("front_splitter", params_used,
+                           f"Depth {depth_mm:.0f}mm exceeds the "
+                           f"{SPLITTER_MAX_DEPTH_MM:.0f}mm structural limit for "
+                           f"road use", Cd0)
+    if depth_mm <= 0:
+        return _infeasible("front_splitter", params_used, "Zero depth", Cd0)
+
+    clearance_mm = p["underbody_clearance_norm"] * p["height_m"] * 1000.0
+
+    # Flow diverted around rather than under, as a share of underbody drag
+    effectiveness = float(np.clip(
+        SPLITTER_UNDERBODY_GAIN * (depth_mm / clearance_mm), 0.0, 0.30))
+    available = b["Cd_underbody"]
+    delta_under = available * effectiveness
+
+    # Stagnation-face benefit, scaled from the 50 mm reference depth
+    delta_stag = SPLITTER_STAG_CD * (depth_mm / 50.0) ** 0.6
+
+    delta = delta_under + delta_stag
+
+    b["Cd_underbody"] = available - delta_under
+    b["Cd_pressure"] = max(b["Cd_pressure"] - delta_stag, 0.0)
+    Cd_new = budget_Cd(b)
+
+    constraint = ("Approaching the structural limit for road use"
+                  if depth_mm > 60 else None)
+
+    return ModResult(
+        mod_name="front_splitter",
+        params_used=params_used,
+        delta_Cd=delta, delta_Cd_pct=delta / Cd0 * 100,
+        component="Cd_underbody",
+        constraint_hit=constraint,
+        explanation=(
+            f"Splitter projecting {depth_mm:.0f}mm forward against a "
+            f"{clearance_mm:.0f}mm ride height. It diverts "
+            f"{effectiveness*100:.0f}% of the underbody flow around the car, "
+            f"taking DeltaCd={delta_under:.4f} off the remaining underbody drag "
+            f"of {available:.4f}. Lowering the stagnation point on the bumper "
+            f"face adds {delta_stag:.4f}. Total DeltaCd={delta:.4f} "
+            f"({delta/Cd0*100:.1f}%)."),
+        Cd_new=Cd_new, feasible=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# F. SIDE SKIRTS  ->  Cd_underbody
+# ════════════════════════════════════════════════════════════════
+
+def mod_side_skirts(b: dict, height_mm: float = 50.0,
+                    coverage_fraction: float = 0.75) -> ModResult:
+    """
+    Skirts sealing the gap between the sill and the road.
+
+    The car's flanks sit near stagnation pressure; the underbody is low
+    pressure. That difference drives a continuous spanwise leak under the sills,
+    which rolls up into a pair of edge vortices and thickens the underbody
+    boundary layer. Skirts seal the leak.
+
+    A skirt only fixes the EDGES of the floor. It does nothing about the
+    exhaust and suspension down the middle, so its share of underbody drag is
+    capped. The old model tried to compute this as lifting-line induced drag
+    from vortex circulation and produced DeltaCd = 0.0001 — a hundred times too
+    small, making side skirts a no-op that the optimiser correctly never chose.
+    """
+    Cd0 = budget_Cd(b)
+    p = b["params"]
+    params_used = dict(height_mm=height_mm, coverage_fraction=coverage_fraction)
+
+    clearance_mm = p["underbody_clearance_norm"] * p["height_m"] * 1000.0
+    ground_gap_mm = clearance_mm - height_mm
+
+    if ground_gap_mm < SKIRT_MIN_GROUND_GAP_MM:
+        return _infeasible("side_skirts", params_used,
+                           f"A {height_mm:.0f}mm skirt leaves only "
+                           f"{ground_gap_mm:.0f}mm to the road, below the "
+                           f"{SKIRT_MIN_GROUND_GAP_MM:.0f}mm debris minimum",
+                           Cd0)
+    if height_mm <= 0:
+        return _infeasible("side_skirts", params_used, "Zero height", Cd0)
+
+    seal = float(np.clip(SKIRT_SEAL_GAIN * (height_mm / clearance_mm),
+                         0.0, SKIRT_SEAL_MAX))
+    available = b["Cd_underbody"]
+    delta = available * seal * coverage_fraction
+
+    b["Cd_underbody"] = available - delta
+    # Skirts also protect the diffuser's spanwise pressure gradient.
+    b["diffuser_eta_bonus"] = b.get("diffuser_eta_bonus", 0.0) + DIFFUSER_ETA_SKIRT_BONUS
+    Cd_new = budget_Cd(b)
+
+    return ModResult(
+        mod_name="side_skirts",
+        params_used=params_used,
+        delta_Cd=delta, delta_Cd_pct=delta / Cd0 * 100,
+        component="Cd_underbody",
+        constraint_hit=None,
+        explanation=(
+            f"Skirts {height_mm:.0f}mm deep over {coverage_fraction*100:.0f}% of "
+            f"the wheelbase, leaving {ground_gap_mm:.0f}mm to the road. They "
+            f"seal the pressure leak between the flanks and the floor, killing "
+            f"the underbody edge vortices: {seal*100:.0f}% of the remaining "
+            f"underbody drag ({available:.4f}). DeltaCd={delta:.4f} "
+            f"({delta/Cd0*100:.1f}%)."),
+        Cd_new=Cd_new, feasible=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# COMBINING MODIFICATIONS
+# ════════════════════════════════════════════════════════════════
+
+# Order matters physically: flow-conditioning mods (skirts, floor) must be
+# applied before the diffuser, because they change the air the diffuser is
+# given. Sorting here makes the result independent of the order the caller
+# happened to list them in.
+_APPLY_ORDER = ["wheel_covers", "underbody_panel", "side_skirts",
+                "front_splitter", "rear_diffuser", "rear_spoiler"]
+
+_MOD_NAME = {
+    "mod_wheel_covers": "wheel_covers",
+    "mod_underbody_panel": "underbody_panel",
+    "mod_side_skirts": "side_skirts",
+    "mod_front_splitter": "front_splitter",
+    "mod_rear_diffuser": "rear_diffuser",
+    "mod_rear_spoiler": "rear_spoiler",
+}
+
 
 def apply_mod_set(baseline: dict, mod_list: list) -> ModSet:
     """
-    Apply a list of modifications sequentially and compute combined ΔCd.
+    Apply several modifications to one car and return the combined result.
 
-    Modifications interact — applying a diffuser after side skirts is more
-    effective because skirts prevent lateral contamination of the diffuser
-    flow. The interaction model is conservative (additive with one
-    interaction correction term) rather than claiming perfect independence.
+    The budget is threaded through every modification. Each one sees what the
+    previous ones left behind, so:
 
-    Args:
-        baseline  : result dict from solve_car() or solve()
-        mod_list  : list of (function, kwargs) tuples e.g.:
-                    [(mod_underbody_panel, {'coverage_fraction': 0.7}),
-                     (mod_rear_diffuser,   {'angle_deg': 5.0})]
+      * two mods drawing on the same component cannot both spend it
+      * two mods raising the wake pressure compound on the running Cpb rather
+        than both claiming credit against the pristine baseline
+      * a mod that is INFEASIBLE consumes nothing and confers nothing
 
-    Returns:
-        ModSet with combined ΔCd and per-modification breakdown
+    That last point was a real bug: the old code granted an 8% "skirt + diffuser
+    synergy" bonus whenever a diffuser appeared in the list, without checking
+    that the diffuser had actually been fitted. On a Honda City, where the
+    diffuser is rejected for having 119 mm of ground clearance against a 120 mm
+    legal minimum, the car still collected the synergy for it.
+
+    Interactions are now physical rather than a bonus multiplier: skirts and a
+    floor panel raise the DIFFUSER'S EFFICIENCY, and that improved efficiency
+    then flows through the diffuser's own Bernoulli calculation.
     """
-    results    = []
-    Cd_current = baseline['Cd']
-    # Build a mutable baseline copy so each mod sees updated Cd
-    current_baseline = dict(baseline)
+    b = make_budget(baseline)
+    Cd_start = budget_Cd(b)
 
-    for fn, kwargs in mod_list:
-        result = fn(current_baseline, **kwargs)
-        results.append(result)
-        if result.feasible:
-            current_baseline = dict(baseline)
-            current_baseline['Cd'] = result.Cd_new
-            Cd_current = result.Cd_new
+    ordered = sorted(
+        mod_list,
+        key=lambda fk: _APPLY_ORDER.index(_MOD_NAME.get(fk[0].__name__, "rear_spoiler")))
 
-    total_delta = baseline['Cd'] - Cd_current
+    results = []
+    for fn, kwargs in ordered:
+        results.append(fn(b, **(kwargs or {})))
 
-    # ── Interaction effect ────────────────────────────────────────
-    has_skirts   = any(r.mod_name == "side_skirts"   for r in results)
-    has_diffuser = any(r.mod_name == "rear_diffuser"  for r in results)
-    has_panel    = any(r.mod_name == "underbody_panel" for r in results)
+    Cd_final = budget_Cd(b)
+    total = Cd_start - Cd_final
 
-    interaction_note = ""
-    if has_skirts and has_diffuser:
-        # Skirts improve diffuser effectiveness by ~15%
-        bonus = total_delta * 0.08
-        Cd_current   -= bonus
-        total_delta  += bonus
-        interaction_note += (
-            "Skirt + diffuser synergy: skirts seal underbody, improving "
-            f"diffuser pressure recovery by ~8% (ΔCd bonus ≈ {bonus:.4f}). "
-        )
-    if has_panel and has_diffuser:
-        bonus = total_delta * 0.05
-        Cd_current  -= bonus
-        total_delta += bonus
-        interaction_note += (
-            "Underbody panel + diffuser synergy: smooth panel reduces "
-            f"boundary layer thickness entering diffuser (+5% recovery). "
-        )
-
-    if not interaction_note:
-        interaction_note = "No significant interaction effects between these modifications."
+    fitted = {r.mod_name for r in results if r.feasible}
+    notes = []
+    if "side_skirts" in fitted and "rear_diffuser" in fitted:
+        notes.append(
+            f"Skirts seal the floor, so the diffuser sees a clean spanwise "
+            f"pressure field: its efficiency rises by "
+            f"{DIFFUSER_ETA_SKIRT_BONUS:.2f} and that is already inside the "
+            f"diffuser's recovery figure above.")
+    if "underbody_panel" in fitted and "rear_diffuser" in fitted:
+        notes.append(
+            f"The floor panel delivers a thinner boundary layer into the "
+            f"diffuser throat (+{DIFFUSER_ETA_PANEL_BONUS:.2f} efficiency).")
+    if "underbody_panel" in fitted and "side_skirts" in fitted:
+        notes.append(
+            "Panel and skirts both draw on underbody drag, so their gains do "
+            "not add: whichever is fitted second finds less left to take.")
 
     return ModSet(
         modifications=results,
-        delta_Cd_total=total_delta,
-        Cd_final=max(Cd_current, 0.05),
-        interaction_note=interaction_note
+        delta_Cd_total=total,
+        Cd_final=Cd_final,
+        interaction_note=(" ".join(notes) if notes
+                          else "No significant interaction between these modifications."),
+        budget_final={k: v for k, v in b.items()
+                      if k.startswith("Cd_") or k == "Cpb"},
     )
 
 
+# The panel-panel interaction above is handled by state threading, but the
+# diffuser needs the floor bonus set BEFORE it runs. side_skirts sets its own;
+# underbody_panel sets its bonus here so ordering stays declarative.
+_orig_panel = mod_underbody_panel
+
+
+def mod_underbody_panel(b: dict, coverage_fraction: float = 0.70) -> ModResult:  # noqa: F811
+    r = _orig_panel(b, coverage_fraction=coverage_fraction)
+    if r.feasible:
+        b["diffuser_eta_bonus"] = (b.get("diffuser_eta_bonus", 0.0)
+                                   + DIFFUSER_ETA_PANEL_BONUS * coverage_fraction)
+    return r
+
+
+mod_underbody_panel.__doc__ = _orig_panel.__doc__
+
+
 # ════════════════════════════════════════════════════════════════
-# PRINT HELPERS
+# PRINTING
 # ════════════════════════════════════════════════════════════════
 
-def print_mod_result(r: ModResult):
-    status = "✓ FEASIBLE" if r.feasible else "✗ INFEASIBLE"
-    print(f"\n  [{r.mod_name.upper().replace('_',' ')}]  {status}")
-    print(f"    ΔCd = {r.delta_Cd:+.4f}  ({r.delta_Cd_pct:+.1f}%)")
-    print(f"    Cd after: {r.Cd_new:.4f}")
+def print_mod_result(r: ModResult, width: int = 76):
+    status = "FEASIBLE" if r.feasible else "NOT FITTED"
+    print(f"\n  [{r.mod_name.upper().replace('_', ' ')}]  {status}")
+    if r.feasible:
+        print(f"    DeltaCd = {r.delta_Cd:+.4f}  ({r.delta_Cd_pct:+.2f}%)   "
+              f"from {r.component}")
+        print(f"    Cd after: {r.Cd_new:.4f}")
     if r.constraint_hit:
         print(f"    Constraint: {r.constraint_hit}")
-    # Wrap explanation at 70 chars
-    words  = r.explanation.split()
-    line   = "    "
-    for w in words:
-        if len(line) + len(w) > 74:
-            print(line); line = "    " + w + " "
+    line = "    "
+    for word in r.explanation.split():
+        if len(line) + len(word) > width:
+            print(line)
+            line = "    " + word + " "
         else:
-            line += w + " "
+            line += word + " "
     if line.strip():
         print(line)
 
 
 def print_mod_set(ms: ModSet, baseline_Cd: float):
-    print("\n" + "=" * 66)
-    print("  MODIFICATION SET SUMMARY")
-    print("=" * 66)
+    print("\n" + "=" * 72)
+    print("  MODIFICATION SET")
+    print("=" * 72)
     for r in ms.modifications:
-        flag = "✓" if r.feasible else "✗"
-        print(f"  {flag} {r.mod_name:<22}  ΔCd={r.delta_Cd:+.4f}  "
-              f"({r.delta_Cd_pct:+.1f}%)")
-    print("  " + "-" * 62)
-    print(f"  TOTAL drag reduction:   ΔCd = {ms.delta_Cd_total:+.4f}")
-    print(f"  Baseline Cd:            {baseline_Cd:.4f}")
-    print(f"  Final Cd:               {ms.Cd_final:.4f}")
-    pct = ms.delta_Cd_total / baseline_Cd * 100
-    print(f"  Total improvement:      {pct:.1f}%")
-    print(f"\n  Interaction note: {ms.interaction_note}")
-    print("=" * 66)
+        flag = "+" if r.feasible else "x"
+        if r.feasible:
+            print(f"  {flag} {r.mod_name:<18} DeltaCd={r.delta_Cd:+.4f} "
+                  f"({r.delta_Cd_pct:+5.2f}%)  <- {r.component}")
+        else:
+            print(f"  {flag} {r.mod_name:<18} not fitted: {r.constraint_hit}")
+    print("  " + "-" * 68)
+    print(f"  Baseline Cd : {baseline_Cd:.4f}")
+    print(f"  Final Cd    : {ms.Cd_final:.4f}")
+    print(f"  Total       : DeltaCd = {ms.delta_Cd_total:+.4f}  "
+          f"({ms.delta_Cd_total / baseline_Cd * 100:.1f}% of baseline)")
+    print(f"\n  Interaction: {ms.interaction_note}")
+    print("=" * 72)
 
-
-# ════════════════════════════════════════════════════════════════
-# DEMO
-# ════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("\n  LAYER 2 — MODIFICATION PHYSICS ENGINE")
-    print("  Testing on Maruti Swift and Tata Nexon\n")
+    import sys
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
 
     for car_key in ["maruti_swift", "tata_nexon"]:
-        baseline = solve_car(car_key)
-        car_name = INDIAN_CARS[car_key]["display_name"]
-
-        print(f"\n{'═'*66}")
-        print(f"  {car_name}")
-        print(f"  Baseline Cd = {baseline['Cd']:.4f}")
-        print(f"{'═'*66}")
-
-        # Test each modification individually at sensible defaults
-        mods_to_test = [
-            (mod_underbody_panel,  dict(coverage_fraction=0.70)),
-            (mod_rear_diffuser,    dict(angle_deg=5.0, length_norm=0.12)),
-            (mod_rear_spoiler,     dict(chord_m=0.25, angle_deg=8.0)),
-            (mod_front_splitter,   dict(depth_mm=50.0)),
-            (mod_side_skirts,      dict(height_mm=55.0)),
-            (mod_wheel_covers,     dict(n_wheels_covered=4)),
-        ]
-
-        for fn, kwargs in mods_to_test:
-            r = fn(baseline, **kwargs)
-            print_mod_result(r)
-
-        # Full combined set
-        print(f"\n  ── COMBINED MODIFICATION SET ──")
-        ms = apply_mod_set(baseline, [
+        base = solve_car(car_key)
+        print(f"\n{'=' * 72}")
+        print(f"  {INDIAN_CARS[car_key]['display_name']}   baseline Cd = {base['Cd']:.4f}")
+        print(f"{'=' * 72}")
+        for fn, kw in [
+            (mod_wheel_covers, dict(n_wheels_covered=4)),
             (mod_underbody_panel, dict(coverage_fraction=0.70)),
-            (mod_rear_diffuser,   dict(angle_deg=5.0, length_norm=0.12)),
-            (mod_side_skirts,     dict(height_mm=55.0)),
-            (mod_wheel_covers,    dict(n_wheels_covered=4)),
-            (mod_rear_spoiler,    dict(chord_m=0.20, angle_deg=7.0)),
+            (mod_side_skirts, dict(height_mm=50.0)),
+            (mod_front_splitter, dict(depth_mm=50.0)),
+            (mod_rear_diffuser, dict(angle_deg=5.0, length_norm=0.12)),
+            (mod_rear_spoiler, dict(chord_m=0.20, angle_deg=7.0)),
+        ]:
+            print_mod_result(fn(make_budget(base), **kw))
+
+        ms = apply_mod_set(base, [
+            (mod_underbody_panel, dict(coverage_fraction=0.70)),
+            (mod_side_skirts, dict(height_mm=50.0)),
+            (mod_rear_diffuser, dict(angle_deg=5.0, length_norm=0.12)),
+            (mod_wheel_covers, dict(n_wheels_covered=4)),
         ])
-        print_mod_set(ms, baseline['Cd'])
+        print_mod_set(ms, base["Cd"])
