@@ -154,11 +154,17 @@
   .blegend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;vertical-align:-1px}
   .flowcap{margin-top:12px;font-size:12.5px;color:var(--ink-dim);line-height:1.5}
   .flowcap b{color:var(--amber-b)}
-  .flowtoggle{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;margin-bottom:12px}
+  .flowtoggle{display:flex;flex-wrap:wrap;gap:1px;align-items:stretch;border:1px solid var(--line);
+    border-radius:7px;overflow:hidden;margin-bottom:12px}
   .flowtoggle button{font-family:var(--mono);font-size:12px;padding:6px 15px;border:0;
     background:transparent;color:var(--faint);cursor:pointer;text-transform:uppercase;letter-spacing:.08em}
   .flowtoggle button[aria-pressed="true"]{background:var(--panel);color:var(--amber-b);
     box-shadow:inset 0 -2px 0 var(--amber)}
+  .flowtoggle .ftgap{flex:1}
+  .flowprobe{position:absolute;pointer-events:none;display:none;z-index:5;
+    font-size:11.5px;background:rgba(18,13,7,.94);border:1px solid var(--line);
+    border-radius:6px;padding:5px 9px;color:var(--ink);white-space:nowrap}
+  .hintline{font-size:11px;color:var(--faint);margin:8px 0 0;letter-spacing:.03em}
 
   /* forms */
   .tune{background:var(--bg2);border:1px solid var(--ridge);border-radius:10px;padding:18px 20px}
@@ -181,7 +187,8 @@
     background:var(--screen);min-height:200px}
   .scan canvas{display:block;width:100%;height:auto;touch-action:none;cursor:grab}
   .scan .drop{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-    color:var(--faint);font-size:13px;text-align:center;padding:20px;text-transform:uppercase;letter-spacing:.06em}
+    color:var(--faint);font-size:13px;text-align:center;padding:20px;text-transform:uppercase;
+    letter-spacing:.06em;pointer-events:none}
   .scan .ctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
   .scan .ctl label{color:var(--faint);font-size:12.5px;text-transform:uppercase;letter-spacing:.05em}
   .scan input[type=number]{width:76px;background:var(--screen);color:var(--ink);border:1px solid var(--line);
@@ -268,7 +275,7 @@
         side-on photo. We place seven dots on your car; drag any that are off.
         Nothing leaves your device — this runs entirely in your browser.</p>
         <label for="scanFile" class="uploadbox" id="scanDropLabel">
-          <span class="uicon">\u2b06</span>
+          <span class="uicon">📷</span>
           <span><b>Choose / take a side photo</b><br>
           <small>tap here — png or jpg, on your device only</small></span>
         </label>
@@ -288,7 +295,7 @@
         </div>
         <div class="ctl" style="margin-top:6px">
           <span style="color:var(--faint);font-size:12px">body type is read from the photo; you can override it below after reading</span>
-          <button class="act" id="scanGo">read my car \u2192</button>
+          <button class="act" id="scanGo">read my car →</button>
         </div>
         <div class="found" id="scanFound"></div>
       </div>
@@ -853,22 +860,33 @@ try{
     FLOW[a]={g:f.grid,q:f.qscale,U:b64i16(f.u),V:b64i16(f.v),M:b64u8(f.mask),body:f.body};}
 }catch(e){}
 
-let afInit=false, afArch="hatchback", afWakeRatio=1, afRun=true;
-let afCanvas, afx, afPts, afN=700;
+let afInit=false, afArch="hatchback", afWakeRatio=1, afRun=true, afShowField=false;
+let afCanvas, afx, afPts, afN=700, afFieldImg=null, afFieldArch=null;
 
 function afBuild(){
   document.getElementById("airflow").innerHTML =
-    '<div class="flowtoggle" role="group" aria-label="which parts">'
+    '<div class="flowtoggle" role="group" aria-label="airflow controls">'
     + '<button data-set="legal" aria-pressed="true">recommended</button>'
-    + '<button data-set="max" aria-pressed="false">maximum</button></div>'
+    + '<button data-set="max" aria-pressed="false">maximum</button>'
+    + '<span class="ftgap"></span>'
+    + '<button data-act="play" aria-pressed="true">pause</button>'
+    + '<button data-act="field" aria-pressed="false">pressure field</button>'
+    + '</div>'
     + '<div class="flowscreen"><div class="flowlabel" id="flowWakeLabel"></div>'
-    + '<canvas id="flowCanvas" width="920" height="300" '
-    + 'aria-label="live airflow around your car"></canvas></div>'
+    + '<div class="flowprobe" id="flowProbe"></div>'
+    + '<canvas id="flowCanvas" width="920" height="300" aria-label="live airflow around your car"></canvas></div>'
+    + '<div class="hintline">amber = pressure (pushes) \u00b7 blue = suction (pulls) \u00b7 hover the flow to probe it</div>'
     + '<div class="budgetrow" id="flowBudget"></div>'
     + '<div class="flowcap" id="flowCap"></div>';
   document.querySelectorAll("#airflow .flowtoggle button").forEach(btn =>
-    btn.addEventListener("click", () => { airflowSet = btn.dataset.set; updateAirflow(); }));
-  try{ afStartCanvas(); }catch(e){ /* canvas optional; bars still render */ }
+    btn.addEventListener("click", () => {
+      if (btn.dataset.set){ airflowSet = btn.dataset.set; updateAirflow(); }
+      else if (btn.dataset.act === "play"){ afRun = !afRun;
+        btn.setAttribute("aria-pressed", afRun); btn.textContent = afRun ? "pause" : "play"; }
+      else if (btn.dataset.act === "field"){ afShowField = !afShowField;
+        btn.setAttribute("aria-pressed", afShowField); }
+    }));
+  try{ afStartCanvas(); }catch(e){}
   afInit = true;
 }
 
@@ -897,22 +915,34 @@ function afStartCanvas(){
   const SX = x => { const f=FLOW[afArch]||f0; return (x-f.g.x_lo)/(f.g.x_hi-f.g.x_lo)*W; };
   const SY = y => { const f=FLOW[afArch]||f0; return (1-(y-f.g.y_lo)/(f.g.y_hi-f.g.y_lo))*H; };
 
+  function cpColor(cp){
+    const bg=[22,16,9]; let c,t;
+    if(cp>=0){ c=[230,138,43]; t=Math.min(cp/1.0,1); } else { c=[90,150,180]; t=Math.min(-cp/1.4,1); }
+    t=Math.pow(t,0.75)*0.85;
+    return [bg[0]+(c[0]-bg[0])*t, bg[1]+(c[1]-bg[1])*t, bg[2]+(c[2]-bg[2])*t];
+  }
+  function fieldImage(f){
+    const NX=f.g.nx, NY=f.g.ny;
+    const oc=document.createElement("canvas"); oc.width=NX; oc.height=NY;
+    const o=oc.getContext("2d"), img=o.createImageData(NX,NY);
+    for(let iy=0;iy<NY;iy++){ const srow=(NY-1-iy)*NX;
+      for(let ix=0;ix<NX;ix++){ const k=srow+ix, di=(iy*NX+ix)*4; let rgb;
+        if(f.M[k]===1) rgb=[30,23,16]; else if(f.M[k]===2) rgb=[26,19,12];
+        else { const u=f.U[k]/f.q,v=f.V[k]/f.q; rgb=cpColor(1-(u*u+v*v)); }
+        img.data[di]=rgb[0]; img.data[di+1]=rgb[1]; img.data[di+2]=rgb[2]; img.data[di+3]=255; }}
+    o.putImageData(img,0,0); return oc;
+  }
+
   function bodyAndWake(){
     const f=FLOW[afArch]||f0;
-    // base extents from the rear of the body outline
     let bt=1e9, bb=-1e9, bx=0;
     for(const [x,y] of f.body){ if(x>0.93){ bt=Math.min(bt,y); bb=Math.max(bb,y); bx=Math.max(bx,x);} }
-    // wake overlay, length scales with the current pressure ratio
-    const wl = 0.9*afWakeRatio;
-    const mid=(bt+bb)/2, spr=(bb-bt)*0.55;
-    afx.beginPath();
-    afx.moveTo(SX(bx),SY(bt));
+    const wl=0.9*afWakeRatio, mid=(bt+bb)/2, spr=(bb-bt)*0.55;
+    afx.beginPath(); afx.moveTo(SX(bx),SY(bt));
     afx.bezierCurveTo(SX(bx+wl*0.4),SY(bt+spr*0.3),SX(bx+wl),SY(mid+spr),SX(bx+wl),SY(mid));
     afx.bezierCurveTo(SX(bx+wl),SY(mid-spr),SX(bx+wl*0.4),SY(bb-spr*0.3),SX(bx),SY(bb));
-    afx.closePath();
-    afx.fillStyle="rgba(230,138,43,0.16)"; afx.fill();
+    afx.closePath(); afx.fillStyle="rgba(230,138,43,0.16)"; afx.fill();
     afx.strokeStyle="#B26A22"; afx.lineWidth=1; afx.stroke();
-    // body
     afx.beginPath();
     f.body.forEach((pt,i)=> i?afx.lineTo(SX(pt[0]),SY(pt[1])):afx.moveTo(SX(pt[0]),SY(pt[1])));
     afx.closePath(); afx.fillStyle="#1E1710"; afx.fill();
@@ -921,16 +951,22 @@ function afStartCanvas(){
 
   function frame(){
     if(afRun){
-      afx.globalCompositeOperation="destination-out";
-      afx.fillStyle="rgba(0,0,0,0.15)"; afx.fillRect(0,0,W,H);
-      afx.globalCompositeOperation="source-over";
       const f=FLOW[afArch]||f0;
+      if(afShowField){
+        if(afFieldArch!==afArch){ afFieldImg=fieldImage(f); afFieldArch=afArch; }
+        afx.globalCompositeOperation="source-over";
+        afx.imageSmoothingEnabled=true; afx.drawImage(afFieldImg,0,0,W,H);
+      } else {
+        afx.globalCompositeOperation="destination-out";
+        afx.fillStyle="rgba(0,0,0,0.15)"; afx.fillRect(0,0,W,H);
+        afx.globalCompositeOperation="source-over";
+      }
       for(let i=0;i<afN;i++){
         const x=afPts[i*2],y=afPts[i*2+1]; const m=sample(f,x,y,vo);
         const nx=x+vo[0]*DT, ny=y+vo[1]*DT;
         if(m===1||m===2||nx>f.g.x_hi-0.02||ny<f.g.y_lo+0.01||ny>f.g.y_hi-0.01){spawn(i);continue;}
         const sp=Math.hypot(vo[0],vo[1]);
-        afx.strokeStyle="rgba(246,224,180,"+Math.min(0.22+sp*0.5,0.92)+")";
+        afx.strokeStyle="rgba(246,224,180,"+Math.min((afShowField?0.5:0.22)+sp*0.5,0.95)+")";
         afx.lineWidth=1.2; afx.beginPath(); afx.moveTo(SX(x),SY(y)); afx.lineTo(SX(nx),SY(ny)); afx.stroke();
         afPts[i*2]=nx; afPts[i*2+1]=ny;
       }
@@ -939,6 +975,25 @@ function afStartCanvas(){
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+
+  // hover probe: local speed & pressure, like the standalone explorer
+  afCanvas.addEventListener("mousemove", e => {
+    const pr=document.getElementById("flowProbe"); if(!pr) return;
+    const f=FLOW[afArch]||f0, r=afCanvas.getBoundingClientRect(),
+          fs=afCanvas.parentElement.getBoundingClientRect();
+    const wx=f.g.x_lo+(e.clientX-r.left)/r.width*(f.g.x_hi-f.g.x_lo);
+    const wy=f.g.y_lo+(1-(e.clientY-r.top)/r.height)*(f.g.y_hi-f.g.y_lo);
+    const m=sample(f,wx,wy,vo);
+    if(m===1){ pr.style.display="none"; return; }
+    const sp=Math.hypot(vo[0],vo[1]);
+    const cp=m===2 ? (state.car&&state.car.Cpb || -0.35) : 1-sp*sp;
+    pr.style.display="block";
+    pr.style.left=(e.clientX-fs.left+12)+"px"; pr.style.top=(e.clientY-fs.top+10)+"px";
+    pr.innerHTML = m===2 ? "WAKE \u00b7 modelled at Cp "+cp.toFixed(2)
+      : "v/V "+sp.toFixed(2)+" \u00b7 Cp "+cp.toFixed(2)+(cp<0?" suction":" pressure");
+  });
+  afCanvas.addEventListener("mouseleave", () => {
+    const pr=document.getElementById("flowProbe"); if(pr) pr.style.display="none"; });
 }
 
 function updateAirflow(){
