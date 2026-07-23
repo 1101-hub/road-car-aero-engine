@@ -1,12 +1,26 @@
 ![The Maruti Swift's computed pressure field — cyan/blue suction, magenta/orange pressure, rendered from this repository's own solver](output/banner.png)
 
-# Road Car Aerodynamic Fuel Efficiency Engine
+# Physics-First Aerodynamic Fuel Optimizer
 
-![Python](https://img.shields.io/badge/python-3.10+-blue) ![Physics](https://img.shields.io/badge/method-panel%20method-green) ![No ML](https://img.shields.io/badge/ML-none-lightgrey) ![Tests](https://img.shields.io/badge/tests-408%20passing-brightgreen)
+![Python](https://img.shields.io/badge/python-3.10+-blue) ![Panel method](https://img.shields.io/badge/physics-panel%20method-green) ![Computer vision](https://img.shields.io/badge/AI-computer%20vision-orange) ![Tests](https://img.shields.io/badge/tests-408%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-A physics-first tool that works out which aerodynamic modifications actually reduce a road car's fuel consumption, by how much, **within what error bars, and whether you may legally fit them**. No machine learning. No invented data. Every number traces to a fluid-dynamics equation, a measured dimension, or a public standard — and every claim the code makes is enforced by a test.
+**Point a phone at any car and find the bolt-on parts that cut its fuel bill** — which modification, at what geometry, on that specific car, actually reduces drag, by how much, at what cost, and whether it's legal to fit in India. A computer-vision front-end reads the car's shape straight from a photo; a first-principles fluid-physics engine does the rest. No black-box models — every number traces to a fluid-dynamics equation, a measured dimension, or a public standard, and every claim is enforced by a test.
 
-Built for India's existing petrol and diesel fleet, which receives no aerodynamic attention after it leaves the factory.
+Built for India's ~300 million existing petrol and diesel vehicles, which get zero aerodynamic attention after they leave the factory.
+
+**Try it (no install):** [the recommender](web/recommend.html) · [the live flow explorer](web/flow_explorer.html) — self-contained web apps that run entirely in the browser. Enable GitHub Pages and the whole thing is a public link.
+
+---
+
+## Why it matters — impact, SDGs, responsible use
+
+**The problem, with evidence.** India runs one of the world's largest vehicle fleets — 300M+ registered vehicles ([MoRTH, 2023](https://morth.nic.in/)) — and road transport is a major share of national CO₂ ([IEA, *India Energy Outlook 2021*](https://www.iea.org/reports/india-energy-outlook-2021)). Aerodynamic drag burns 40–50% of a car's fuel at highway speed (Hucho, *Aerodynamics of Road Vehicles*, 1998), yet a car's aerodynamics is fixed at manufacture and never revisited. A large aftermarket sells spoilers, diffusers and body kits with **no physics guidance** — fitted wrongly they *increase* drag and fuel use.
+
+**Who it helps.** Ordinary owners, for whom fuel is a big recurring cost and a new efficient car is out of reach; mechanics and the accessory trade; small fleets. It's free, runs in any phone or laptop browser, needs no login, and works **offline once loaded** — for users with a smartphone but no engineering knowledge and no access to CFD or a wind tunnel.
+
+**Environmental impact → SDGs.** Even a 3–5% aerodynamic saving across a fraction of the fleet avoids **millions of tonnes of CO₂** and real money per household each year. Directly serves **SDG 13 (Climate Action)** and **SDG 12 (Responsible Consumption & Production)**.
+
+**Responsible and private by design.** Open-source and auditable; **photos are processed on-device and never uploaded** (no server, no data collection); every output carries an explicit uncertainty band; a physical sanity bound blocks impossible claims (no bolt-on part can beat the most aerodynamic production car ever built); legal guidance is flagged *"unverified — confirm with your RTO,"* and fitting anything is stated to be the owner's own risk. This is the opposite of an opaque model — it is a tool you can check, and it ships with a road test so you can catch it being wrong.
 
 ---
 
@@ -36,13 +50,13 @@ Numbers second, physics first — this is what the solver actually computes:
 
 Every streamline is evaluated from this repository's own panel solution — the same source strengths that produce the Cd numbers — not stock CFD footage. The hatched region is drawn honestly: past the separation point, potential flow stops being true, so the picture stops pretending and labels the wake as the zone handled by the base-pressure model. That pocket of dead air is roughly 60% of the aerodynamic fuel bill, and shrinking it is what every modification here is for.
 
-**Interactive version:** open [`web/flow_explorer.html`](web/flow_explorer.html) in any browser (no install, no server — the solver's output is embedded in the file). Live particles, four switchable cars, a hover probe reading local speed and pressure, and the drag budget updating per car. Keys: `1–4` cars, `space` pause, `A` annotations.
+**Interactive version:** open [`web/flow_explorer.html`](web/flow_explorer.html) in any browser (no install, no server — the solver's output is embedded in the file). Live particles, ten switchable cars, a hover probe reading local speed and pressure, and the drag budget updating per car. Keys: `1–9` cars, `space` pause, `A` annotations.
 
 Regenerate everything with `python -m core.flowviz` — including the banner above, which is not artwork: it is the Swift's computed pressure field in an iridescent palette (cyan/blue = suction, magenta/orange = pressure). The aesthetic is the data.
 
 ---
 
-## Scan any car from a photo
+## The AI component — read any car from a photo
 
 ![Photo to geometry to drag, on the Maruti Swift](output/vision_demo.png)
 
@@ -261,7 +275,7 @@ core/
   recommend_export.py # precomputes the recommendation page's data
 web/
   recommend.html    # owner-facing recommendation page (static, self-contained)
-  flow_explorer.html# live particle flow around four cars
+  flow_explorer.html# live particle flow around ten cars
 docs/
   COASTDOWN.md      # measurement protocol, safety, error budget
 test/               # 408 tests
