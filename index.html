@@ -4,103 +4,115 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>Road-Car Aero Engine — aerodynamics that pays for itself</title>
+<title>Aero Variance Authority — aerodynamics that pays for itself</title>
 <style>
   :root{
-    --bg:#0D0A14; --panel:#14101E; --line:#2A2438;
-    --ink:#F4F1FA; --muted:#9A93AC; --faint:#6B6580;
-    --g1:#FF6B3D; --g2:#C22B8A; --g3:#1FD4E8; --data:#7FB8E8;
-    --mono:"Cascadia Code","JetBrains Mono",Consolas,monospace;
-    --sans:"Segoe UI Variable Display","Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
+    --bg:#161009; --bg2:#1E1710; --panel:#241B10; --screen:#120D07;
+    --line:#5A4227; --line2:#836035; --ridge:#3A2B18;
+    --ink:#F0E4C9; --ink-dim:#BCA983; --faint:#8B7550;
+    --amber:#E68A2B; --amber-b:#F6AC4E; --amber-d:#B26A22; --ok:#AEBB74;
+    --mono:"DM Mono","Cascadia Code",ui-monospace,"Courier New",monospace;
   }
   *{box-sizing:border-box}
-  html,body{margin:0;background:var(--bg);color:var(--ink);
-    font-family:var(--sans);line-height:1.55}
-  body::before{content:"";position:fixed;inset:0;pointer-events:none;
-    background:
-      radial-gradient(700px 460px at 80% -10%, rgba(31,212,232,.14), transparent 70%),
-      radial-gradient(800px 520px at -15% 25%, rgba(194,43,138,.12), transparent 70%);}
-  .wrap{position:relative;max-width:1000px;margin:0 auto;padding:72px 24px 64px}
-  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.22em;
-    text-transform:uppercase;color:var(--muted)}
-  h1{font-size:clamp(34px,5.6vw,60px);font-weight:750;line-height:1.06;
-    letter-spacing:-.02em;margin:16px 0 18px;max-width:18ch;text-wrap:balance}
-  h1 .grad{background:linear-gradient(92deg,var(--g1),var(--g2) 55%,var(--g3));
-    -webkit-background-clip:text;background-clip:text;color:transparent}
-  .lede{color:var(--muted);max-width:60ch;font-size:17.5px}
-  .cards{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:44px}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--mono);
+    line-height:1.55;-webkit-font-smoothing:antialiased}
+  body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:9;
+    background:repeating-linear-gradient(0deg,rgba(0,0,0,.16) 0 1px,transparent 1px 3px),
+      radial-gradient(120% 90% at 50% 0%,transparent 55%,rgba(0,0,0,.45) 100%);
+    mix-blend-mode:multiply;opacity:.6}
+  a{color:var(--amber-b);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{position:relative;z-index:1;max-width:1000px;margin:0 auto;padding:24px 20px 60px}
+  .bezel{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);
+    border-radius:16px;padding:6px;box-shadow:0 1px 0 rgba(246,172,78,.08) inset,0 8px 30px rgba(0,0,0,.35)}
+  .screen{background:var(--screen);border:1px solid var(--ridge);border-radius:11px;
+    padding:30px 30px;box-shadow:0 0 40px rgba(230,138,43,.06) inset}
+  .mast{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:4px 6px 18px}
+  .mark{width:30px;height:30px;border-radius:50%;flex:none;position:relative;
+    background:radial-gradient(circle at 38% 35%,var(--amber-b),var(--amber-d) 70%,#3a2410);
+    box-shadow:0 0 14px rgba(230,138,43,.5)}
+  .mark::after{content:"";position:absolute;inset:6px 6px auto auto;width:8px;height:8px;border-radius:50%;background:#160f08}
+  .word{font-weight:500;letter-spacing:.24em;text-transform:uppercase;font-size:14px}
+  .mast .meta{margin-left:auto;color:var(--faint);font-size:11px;letter-spacing:.14em;
+    text-transform:uppercase;text-align:right}
+  .mast .meta b{color:var(--ok)}
+  .tag{color:var(--amber);letter-spacing:.28em;text-transform:uppercase;font-size:12px;margin-bottom:14px}
+  h1{font-size:clamp(32px,5.2vw,54px);line-height:1.03;letter-spacing:.005em;font-weight:500;
+    margin:0 0 16px;max-width:20ch;text-transform:uppercase;text-shadow:0 0 22px rgba(230,138,43,.18)}
+  h1 .lit{color:var(--amber-b)}
+  .lede{color:var(--ink-dim);max-width:64ch;font-size:15px}
+  .banner{width:100%;border-radius:10px;border:1px solid var(--ridge);margin-top:26px;display:block}
+  .bcap{font-size:11px;color:var(--faint);margin:8px 2px 0;text-transform:uppercase;letter-spacing:.08em}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}
   @media (max-width:720px){.cards{grid-template-columns:1fr}}
-  a.card{display:block;background:var(--panel);border:1px solid var(--line);
-    border-radius:14px;padding:26px 26px 22px;color:var(--ink);text-decoration:none}
-  a.card:hover{border-color:transparent;
-    background:linear-gradient(var(--panel),var(--panel)) padding-box,
-      linear-gradient(120deg,var(--g1),var(--g2),var(--g3)) border-box;
-    border:1px solid transparent}
-  a.card:focus-visible{outline:2px solid var(--g2);outline-offset:3px}
-  .card .k{font-family:var(--mono);font-size:12px;letter-spacing:.18em;
-    text-transform:uppercase;color:var(--faint)}
-  .card h2{margin:10px 0 8px;font-size:22px;font-weight:650}
-  .card p{margin:0;color:var(--muted);font-size:14.5px}
-  .card .go{display:inline-block;margin-top:14px;font-family:var(--mono);
-    font-size:13px;color:var(--data)}
-  .honest{margin-top:44px;padding:18px 22px;border:1px solid var(--line);
-    border-radius:12px;color:var(--muted);font-size:13.5px;max-width:76ch}
+  a.card{display:block;background:var(--bg2);border:1px solid var(--ridge);border-radius:12px;
+    padding:24px 24px 20px;color:var(--ink);text-decoration:none;transition:border-color .12s}
+  a.card:hover{border-color:var(--amber);box-shadow:0 0 0 1px var(--amber-d) inset,0 0 20px rgba(230,138,43,.1)}
+  a.card:focus-visible{outline:2px solid var(--amber);outline-offset:3px}
+  .card .k{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--amber)}
+  .card h2{margin:9px 0 8px;font-size:18px;font-weight:500;text-transform:uppercase;letter-spacing:.04em}
+  .card p{margin:0;color:var(--ink-dim);font-size:13.5px}
+  .card .go{display:inline-block;margin-top:14px;font-size:12.5px;color:var(--amber-b);
+    text-transform:uppercase;letter-spacing:.06em}
+  .honest{margin-top:22px;padding:16px 20px;border:1px solid var(--ridge);border-radius:10px;
+    color:var(--ink-dim);font-size:13px;max-width:78ch;background:var(--bg2)}
   .honest b{color:var(--ink)}
-  footer{margin-top:48px;font-family:var(--mono);font-size:12.5px;color:var(--faint);
-    display:flex;gap:20px;flex-wrap:wrap}
-  footer a{color:var(--data);text-decoration:none}
+  footer{margin-top:28px;font-size:11px;color:var(--faint);display:flex;gap:20px;flex-wrap:wrap;
+    text-transform:uppercase;letter-spacing:.08em}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="eyebrow">physics-first · no ML · 408 tests · error bars on everything</div>
-  <h1>Cut a car's fuel bill with <span class="grad">aerodynamics that actually works</span></h1>
-  <p class="lede">An open physics engine for India's existing car fleet: it computes
-  which bolt-on modifications reduce fuel consumption, what they cost, when they
-  pay back, and whether they're legal to fit — then hands you a protocol to
-  measure the result on your own car.</p>
-
-  <img src="output/banner.png" style="width:100%;border-radius:14px;
-    border:1px solid var(--line);margin-top:36px" alt="The Maruti Swift's
-    computed pressure field, rendered by this project's solver — cyan/blue
-    suction, magenta/orange pressure">
-  <p style="font-family:var(--mono);font-size:12px;color:var(--faint);
-    margin:8px 2px 0">not artwork — the Swift's actual computed pressure
-    field. cyan/blue: suction · magenta/orange: pressure</p>
-
-  <div class="cards">
-    <a class="card" href="web/recommend.html">
-      <span class="k">for owners</span>
-      <h2>Get your car's recommendation</h2>
-      <p>Pick from ten Indian cars, enter your own, or scan a photo. See
-      the modification set, the rupees per year with honest error bars, the
-      parts cost, the payback period, and the RTO verdict — tuned to your own
-      mileage and fuel price.</p>
-      <span class="go">open the recommender →</span>
-    </a>
-    <a class="card" href="web/flow_explorer.html">
-      <span class="k">for the curious</span>
-      <h2>Watch the air itself</h2>
-      <p>Live particles flowing around real car shapes, computed by the same
-      solver that prices the modifications. Probe the pressure with your cursor.
-      See the wake — the pocket of dead air that is most of your fuel bill.</p>
-      <span class="go">open the flow explorer →</span>
-    </a>
+  <div class="mast">
+    <div class="mark" aria-hidden="true"></div>
+    <div class="word">Aero Variance Authority</div>
+    <div class="meta">physics-first · no black-box ML · 408 tests<br><b>STATUS: OPEN</b> · error bars on everything</div>
   </div>
 
-  <div class="honest"><b>The honesty contract:</b> every number traces to a
-  fluid-dynamics equation, a measured dimension, or a public standard — and
-  ships with its uncertainty. Where the physics can't see something (a 2-D
-  model pricing a hatchback and an SUV nearly the same), the tools say so on
-  screen instead of hiding it. Costs are market estimates; the legal reading is
-  flagged unverified until checked against the primary statute; and the
-  <a href="https://github.com/1101-hub/road-car-aero-engine/blob/main/docs/COASTDOWN.md"
-  style="color:var(--data)">coastdown kit</a> exists so you can catch us being wrong.</div>
+  <div class="bezel"><div class="screen">
+    <div class="tag">Case file — India's existing fleet</div>
+    <h1>Cut a car's fuel bill with <span class="lit">aerodynamics that works</span></h1>
+    <p class="lede">An open physics engine that inspects a car's airflow and issues a
+    verdict: which bolt-on parts reduce fuel use, what they cost, when they pay back,
+    and whether they're legal to fit — then hands you a road test to measure the result
+    on your own car. Point a phone at any car and it reads the shape from the photo.</p>
 
-  <footer>
-    <a href="https://github.com/1101-hub/road-car-aero-engine">github.com/1101-hub/road-car-aero-engine</a>
-    <span>MIT licensed</span>
-  </footer>
+    <img class="banner" src="output/banner.png" alt="The Maruti Swift's computed
+      pressure field — amber pressure, blue suction, rendered by the solver">
+    <p class="bcap">not artwork — the Swift's actual computed pressure field · the aesthetic is the data</p>
+
+    <div class="cards">
+      <a class="card" href="web/recommend.html">
+        <div class="k">for owners</div>
+        <h2>Get your car's verdict</h2>
+        <p>Pick from ten cars, enter your own, or scan a photo. Modifications, rupees
+        per year with honest error bars, parts cost, payback, the RTO ruling — and a
+        before/after look at the airflow.</p>
+        <span class="go">open the recommender →</span>
+      </a>
+      <a class="card" href="web/flow_explorer.html">
+        <div class="k">for the curious</div>
+        <h2>Watch the timeline</h2>
+        <p>Live air flowing around real car shapes, computed by the same solver that
+        prices the parts. Probe the pressure with your cursor. See the wake — the dead
+        air that is most of your fuel bill.</p>
+        <span class="go">open the flow explorer →</span>
+      </a>
+    </div>
+
+    <div class="honest"><b>The honesty contract:</b> every number traces to a
+    fluid-dynamics equation, a measured dimension, or a public standard — and ships
+    with its uncertainty. Where the physics can't see something, the tools say so on
+    screen instead of hiding it. Costs are market estimates; the legal reading is
+    flagged unverified until checked against the statute; and the
+    <a href="https://github.com/1101-hub/road-car-aero-engine/blob/main/docs/COASTDOWN.md">road test</a>
+    exists so you can catch us being wrong.</div>
+
+    <footer>
+      <a href="https://github.com/1101-hub/road-car-aero-engine">github.com/1101-hub/road-car-aero-engine</a>
+      <span>MIT licensed</span>
+    </footer>
+  </div></div>
 </div>
 </body>
 </html>

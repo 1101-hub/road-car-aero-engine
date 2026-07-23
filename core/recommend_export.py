@@ -35,10 +35,42 @@ MOD_LABELS = {
     "rear_diffuser": "Rear diffuser",
 }
 
+# Which drag-BUDGET line each modification actually draws from. This is what
+# makes the before/after airflow honest: only pressure-line mods (diffuser,
+# spoiler) visibly shrink the WAKE; the rest cut friction/wheel/underbody drag
+# that the streamlines barely show, so their effect must be read off the budget
+# bar instead of faked as a flow change.
+MOD_COMPONENT = {
+    "wheel_covers": "Cd_wheels",
+    "underbody_panel": "Cd_underbody",
+    "side_skirts": "Cd_underbody",
+    "front_splitter": "Cd_underbody",
+    "rear_diffuser": "Cd_pressure",
+    "rear_spoiler": "Cd_pressure",
+}
+BUDGET_KEYS = ["Cd_pressure", "Cd_friction", "Cd_underbody",
+               "Cd_wheels", "Cd_cooling", "Cd_mirrors"]
+
 TIER_NAMES = {1: "Start here", 2: "Best value", 3: "Maximum"}
 
 
-def _tier_payload(car_key: str, sol, baseline_Cd: float) -> dict:
+def _budget_after(base_solve, sol) -> dict:
+    """The drag budget after a tier's modifications: subtract each mod's real
+    delta from the budget line it draws from. Re-applies the mod set to recover
+    the per-mod deltas (the grid search discarded them)."""
+    from core.modifications import apply_mod_set
+    ms = apply_mod_set(base_solve, sol.mod_list)
+    after = {k: float(base_solve[k]) for k in BUDGET_KEYS}
+    for r in ms.modifications:
+        if r.feasible:
+            comp = MOD_COMPONENT.get(r.mod_name)
+            if comp:
+                after[comp] = max(after[comp] - r.delta_Cd, 0.0)
+    return after
+
+
+def _tier_payload(car_key: str, sol, baseline_Cd: float,
+                  base_solve=None) -> dict:
     """One tier -> everything the page needs, per driving context."""
     contexts = {}
     for ctx in ("city", "mixed", "highway"):
@@ -62,7 +94,7 @@ def _tier_payload(car_key: str, sol, baseline_Cd: float) -> dict:
             cost_lo=lo, cost_hi=hi, cost_buys=buys,
         ))
 
-    return dict(
+    payload = dict(
         name=TIER_NAMES.get(sol.tier, f"Tier {sol.tier}"),
         tier=sol.tier,
         mods=mods,
@@ -75,6 +107,10 @@ def _tier_payload(car_key: str, sol, baseline_Cd: float) -> dict:
         cost_hi=sol.payback.cost_high_INR,
         legal_as_is=all(m["legal"] == "ok" for m in mods),
     )
+    if base_solve is not None:
+        payload["budget_after"] = {k: round(v, 4)
+                                   for k, v in _budget_after(base_solve, sol).items()}
+    return payload
 
 
 def export_recommend(html_path: str = "web/recommend.html",
@@ -117,7 +153,7 @@ def export_recommend(html_path: str = "web/recommend.html",
         params, car = get_car_params(key)
         comp = check_compliance(car, params, [])
 
-        tiers = [_tier_payload(key, reps[t], baseline["Cd"])
+        tiers = [_tier_payload(key, reps[t], baseline["Cd"], baseline)
                  for t in sorted(reps)]
         # the best fully-legal set, shown as its own headline
         legal_best = max(legal_reps.values(), key=lambda s: s.delta_L_100km)
@@ -128,11 +164,13 @@ def export_recommend(html_path: str = "web/recommend.html",
             archetype=info["archetype"],
             Cd=round(baseline["Cd"], 3),
             Cd_published=info["reference_Cd"],
+            Cpb=round(baseline["Cpb"], 3),
+            budget={k: round(float(baseline[k]), 4) for k in BUDGET_KEYS},
             fuel=info.get("fuel_type", "petrol"),
             kerb_kg=info["kerb_weight_kg"],
             belly_ok=bool(comp.belly_actual_mm >= comp.belly_required_mm),
             tiers=tiers,
-            legal_best=_tier_payload(key, legal_best, baseline["Cd"]),
+            legal_best=_tier_payload(key, legal_best, baseline["Cd"], baseline),
         ))
         if verbose:
             lb = "+".join(legal_best.mod_names)

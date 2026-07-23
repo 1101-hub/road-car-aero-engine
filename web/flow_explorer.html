@@ -6,16 +6,20 @@
   /* ── single-theme by design: this is a simulation instrument, and it
        commits to the dark screen world of the reference it answers to ── */
   :root{
-    --bg:#0B1220; --panel:#121B2E; --panel-2:#0F1727;
-    --ink:#E8EEF7; --muted:#8A97AB; --line:#24314B;
-    --accent:#FF8A4C;
-    --flow-0:#1E3A5F; --flow-1:#3E7BC4; --flow-2:#7FB8E8; --flow-3:#D6EDFF;
-    --mono:"Cascadia Code","JetBrains Mono",Consolas,"Liberation Mono",monospace;
-    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --bg:#161009; --panel:#241B10; --panel-2:#1A130B;
+    --ink:#F0E4C9; --muted:#8B7550; --line:#3A2B18;
+    --accent:#E68A2B;
+    --flow-0:#2E2411; --flow-1:#B26A22; --flow-2:#E68A2B; --flow-3:#F6AC4E;
+    --mono:"DM Mono","Cascadia Code","JetBrains Mono",Consolas,monospace;
+    --sans:"DM Mono","Cascadia Code",ui-monospace,Consolas,monospace;
   }
   *{box-sizing:border-box}
   html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
     font-family:var(--sans);font-size:15px;line-height:1.5}
+  body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:99;
+    background:repeating-linear-gradient(0deg,rgba(0,0,0,.15) 0 1px,transparent 1px 3px),
+      radial-gradient(120% 90% at 50% 0%,transparent 55%,rgba(0,0,0,.4) 100%);
+    mix-blend-mode:multiply;opacity:.55}
   a{color:var(--flow-2)}
   .wrap{max-width:1240px;margin:0 auto;padding:20px 20px 40px}
 
@@ -83,7 +87,7 @@
 
 <div class="wrap">
   <header>
-    <h1>WHERE YOUR FUEL GOES</h1>
+    <h1>THE SACRED TIMELINE — WHERE YOUR FUEL GOES</h1>
     <span class="sub">live flow around real Indian road cars — computed by the
       <a href="https://github.com/1101-hub/road-car-aero-engine">road-car-aero-engine</a> panel solver</span>
   </header>
@@ -103,8 +107,8 @@
         <div><b>A</b> annotations</div>
         <div><b>F</b> pressure field on / off</div>
         <div><b>hover</b> probe local speed &amp; pressure</div>
-        <div style="margin-top:4px;color:#C77B4A">orange = pressure (pushes)</div>
-        <div style="color:#6FA8DC">blue = suction (pulls)</div>
+        <div style="margin-top:4px;color:#E68A2B">amber = pressure (pushes)</div>
+        <div style="color:#6FA8B4">blue = suction (pulls)</div>
       </div>
     </div>
 
@@ -237,10 +241,10 @@ const sy = y => (1 - (y - G.y_lo) / YSPAN) * H;
    live in the particles, magnitude and sign live in the field. One quantity,
    one encoding each. */
 function cpColor(cp){
-  const bg = [11, 18, 32];
+  const bg = [22, 16, 9];
   let target, t;
-  if (cp >= 0){ target = [216, 98, 43];  t = Math.min(cp / 1.0, 1); }
-  else        { target = [86, 156, 214]; t = Math.min(-cp / 1.4, 1); }
+  if (cp >= 0){ target = [230, 138, 43];  t = Math.min(cp / 1.0, 1); }
+  else        { target = [90, 150, 180]; t = Math.min(-cp / 1.4, 1); }
   t = Math.pow(t, 0.75) * 0.85;
   return [bg[0] + (target[0] - bg[0]) * t,
           bg[1] + (target[1] - bg[1]) * t,
@@ -248,7 +252,7 @@ function cpColor(cp){
 }
 let showField = true;
 function drawFieldLayer(){
-  fctx.fillStyle = "#0B1220";
+  fctx.fillStyle = "#161009";
   fctx.fillRect(0, 0, W, H);
   if (showField){
     const off = document.createElement("canvas");
@@ -322,9 +326,9 @@ function drawWake(c2){
 }
 function drawBody(c2){
   poly(c2, cfg.body);
-  c2.fillStyle = "#1F2430";
+  c2.fillStyle = "#241B10";
   c2.fill();
-  c2.strokeStyle = "#3A4560";
+  c2.strokeStyle = "#836035";
   c2.lineWidth = 1.5;
   c2.stroke();
 }
@@ -392,7 +396,7 @@ function frame(){
         continue;
       }
       const sp = Math.hypot(vout[0], vout[1]);          // v / V_inf
-      ctx.strokeStyle = "rgba(235,242,252," + Math.min(0.25 + sp * 0.45, 0.95) + ")";
+      ctx.strokeStyle = "rgba(246,224,180," + Math.min(0.25 + sp * 0.5, 0.95) + ")";
       ctx.lineWidth = 1.3;
       ctx.beginPath();
       ctx.moveTo(sx(px[i]), sy(py[i]));
