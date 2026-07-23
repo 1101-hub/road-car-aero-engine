@@ -113,6 +113,41 @@ def _tier_payload(car_key: str, sol, baseline_Cd: float,
     return payload
 
 
+def _archetype_flow(car_key, nx=200, ny=100):
+    """Precompute a particle-advection velocity field + outline for one car,
+    so the recommendation page can show live airflow without a solver in the
+    browser. Reuses the flow-visualisation engine (core/flowviz)."""
+    import numpy as np
+    from matplotlib.path import Path as MplPath
+    from core import flowviz
+    from core.panel_solver import get_car_params, solve, V_REF
+
+    params, car = get_car_params(car_key)
+    r = solve(params, n_panels=400)
+    pg, sigma, coords, meta, sep = (r["pg"], r["sigma"], r["coords"],
+                                    r["meta"], r["sep_idx"])
+    g = dict(x_lo=-0.5, x_hi=2.05, y_lo=-0.40, y_hi=0.60, nx=nx, ny=ny)
+    gx = np.linspace(g["x_lo"], g["x_hi"], nx)
+    gy = np.linspace(g["y_lo"], g["y_hi"], ny)
+    GX, GY = np.meshgrid(gx, gy)
+    u, v = flowviz.field_velocity(pg, sigma, V_REF, GX.ravel(), GY.ravel())
+    U, V = u / V_REF, v / V_REF
+    pts = np.column_stack([GX.ravel(), GY.ravel()])
+    body = MplPath(coords)
+    wake_poly = flowviz._wake_polygon(coords, meta, sep, pg, g["x_hi"])
+    mask = np.zeros(len(pts), np.uint8)
+    mask[MplPath(wake_poly).contains_points(pts)] = 2
+    mask[body.contains_points(pts)] = 1
+    U[mask == 1] = 0.0
+    V[mask == 1] = 0.0
+    return dict(grid=g, qscale=flowviz.Q_SCALE,
+                u=flowviz._b64_i16(U), v=flowviz._b64_i16(V),
+                mask=flowviz._b64_u8(mask),
+                body=[[round(float(x), 4), round(float(y), 4)]
+                      for x, y in coords[::3]],
+                sep=[round(float(pg["xc"][sep]), 4), round(float(pg["yc"][sep]), 4)])
+
+
 def export_recommend(html_path: str = "web/recommend.html",
                      verbose: bool = True) -> dict:
     # Fuel-saving slope: litres per 100 km saved, per unit of drag area
@@ -141,6 +176,14 @@ def export_recommend(html_path: str = "web/recommend.html",
                        suv="tata_nexon"),
         cars=[],
     )
+
+    # Live particle-flow fields, one per body type — the recommendation page
+    # shows the user's car's CLASS airflow (all a 2-D model can resolve anyway).
+    payload["flow"] = {}
+    for arch, rep in payload["arch_reps"].items():
+        payload["flow"][arch] = _archetype_flow(rep)
+        if verbose:
+            print(f"  flow field: {arch}")
 
     for key, info in INDIAN_CARS.items():
         baseline = solve_car(key)
