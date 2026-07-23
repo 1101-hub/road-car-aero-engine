@@ -52,6 +52,25 @@ from core.panel_solver import (solve_car, INDIAN_CARS, K_ROUGH, K_3D,
 # HARD PHYSICAL AND LEGAL LIMITS
 # ════════════════════════════════════════════════════════════════
 
+CD_PRODUCTION_RECORD = 0.20
+"""The lowest drag coefficient of any car ever mass-produced (Mercedes EQS,
+Lucid Air are ~0.20). A purpose-built EV designed in a wind tunnel from a blank
+sheet.
+
+This is a HARD SANITY FLOOR, not a physics term. A handful of bolt-on parts on a
+mainstream Indian hatchback or SUV cannot make it slipperier than the most
+aerodynamic production car in the world — if the model ever claims that, the
+model is broken, and every number it prints becomes worthless. The original
+solver did exactly this before the rewrite: a stall-limit sign error let it push
+a Maruti Swift to Cd 0.166, below the Mercedes EQXX prototype (0.17), with
+bolt-on parts. test_no_mod_set_beats_the_production_record guards against any
+regression. The current model's most aggressive result anywhere is 0.214 — still
+draggier than a Tesla Model S, which is the correct side of the line."""
+
+CD_PROTOTYPE_RECORD = 0.17
+"""Mercedes-Benz EQXX, the most aerodynamic car ever built — a one-off research
+prototype, not for sale. Nothing this tool outputs may approach it."""
+
 SPOILER_STALL_ANGLE_DEG = 15.0
 """Above this the spoiler stalls: the flow separates off the spoiler itself and
 it becomes a drag device. Katz, "Race Car Aerodynamics" (1995)."""

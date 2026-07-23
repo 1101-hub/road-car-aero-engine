@@ -2,7 +2,7 @@
 
 # Road Car Aerodynamic Fuel Efficiency Engine
 
-![Python](https://img.shields.io/badge/python-3.10+-blue) ![Physics](https://img.shields.io/badge/method-panel%20method-green) ![No ML](https://img.shields.io/badge/ML-none-lightgrey) ![Tests](https://img.shields.io/badge/tests-318%20passing-brightgreen)
+![Python](https://img.shields.io/badge/python-3.10+-blue) ![Physics](https://img.shields.io/badge/method-panel%20method-green) ![No ML](https://img.shields.io/badge/ML-none-lightgrey) ![Tests](https://img.shields.io/badge/tests-408%20passing-brightgreen)
 
 A physics-first tool that works out which aerodynamic modifications actually reduce a road car's fuel consumption, by how much, **within what error bars, and whether you may legally fit them**. No machine learning. No invented data. Every number traces to a fluid-dynamics equation, a measured dimension, or a public standard — and every claim the code makes is enforced by a test.
 
@@ -42,9 +42,28 @@ Regenerate everything with `python -m core.flowviz` — including the banner abo
 
 ---
 
+## Scan any car from a photo
+
+![Photo to geometry to drag, on the Maruti Swift](output/vision_demo.png)
+
+Point a phone at your car, tap seven dots (wheels, roof, nose, tail), and the tool reconstructs its aerodynamic geometry and runs the whole pipeline — for *any* make, not just the ten in the database.
+
+Why this works here when "reconstruct a car from a photo" is normally a hard, model-hungry vision problem: **the solver is parametric.** A car's whole aerodynamic shape is about eight physically-meaningful numbers, so the vision task collapses from "rebuild 3-D geometry" to "measure eight numbers off a silhouette" — classical geometry, **no neural network, no training data, no black box.** That keeps faith with the project's no-black-box stance instead of breaking it.
+
+And because [core/geometry.py](core/geometry.py) runs *forward* (parameters → silhouette), the vision layer ([core/vision.py](core/vision.py)) is just its *inverse* — which means it validates against ground truth for free. Render each of the ten known cars, recover the geometry from the pixels, solve, and compare:
+
+```
+python -m core.vision
+  Cd recovered to mean 2.7%, max 6.7% across 10 cars   (body type: 10/10 correct)
+```
+
+That closed loop — render, recover, solve, compare — is the same honesty pattern as the analytic sphere and the synthetic coastdown. The vision step adds *less* error than the drag model already carries against published figures. What a single side photo can give (dimensionless shape → Cd) and cannot (absolute size needs one known length; width needs the body-type prior) is spelled out at the top of `core/vision.py`. The genuinely hard step — segmenting a car out of a messy photo — is deliberately kept out of the tested core; the robust path is the seven tapped landmarks, which never fail on a cluttered background and port to a few lines of browser JavaScript. Try it in the recommender's **"📷 Scan your car"** button.
+
+---
+
 ## Get a recommendation (no install)
 
-[`web/recommend.html`](web/recommend.html) is the owner-facing product: pick one of the ten cars — or enter your own car's dimensions, get the modification set with **fuel saved (± error bars), parts cost, payback period, and the RTO verdict**, then tune the numbers to your own annual mileage, petrol price and driving mix — all recomputed live, because savings are linear in ΔCd so the physics precomputes and the page only multiplies.
+[`web/recommend.html`](web/recommend.html) is the owner-facing product: pick one of the ten cars, enter your own car's dimensions, or SCAN A PHOTO of it, get the modification set with **fuel saved (± error bars), parts cost, payback period, and the RTO verdict**, then tune the numbers to your own annual mileage, petrol price and driving mix — all recomputed live, because savings are linear in ΔCd so the physics precomputes and the page only multiplies.
 
 The site is fully static: [`index.html`](index.html) is a landing page linking the recommender and the flow explorer. **To put it on the public web:** repo Settings → Pages → deploy from branch → `main`, `/ (root)`. The site then lives at `https://1101-hub.github.io/road-car-aero-engine/` — no server, nothing to maintain.
 
@@ -167,7 +186,7 @@ python main.py --car tata_nexon --legal-only   # only mods needing no RTO approv
 python -m core.aero_3d               # 3D solver: sphere validation + Ahmed sweep
 python -m core.coastdown --demo      # measure CdA from a (synthetic) coastdown
 
-pytest test/ -q                      # 318 tests
+pytest test/ -q                      # 408 tests
 ```
 
 Python 3.10+. NumPy 2.0+ is required (the code uses `np.trapezoid`).
@@ -245,7 +264,7 @@ web/
   flow_explorer.html# live particle flow around four cars
 docs/
   COASTDOWN.md      # measurement protocol, safety, error budget
-test/               # 318 tests
+test/               # 408 tests
 data/               # drop the official WLTP trace here
 output/             # generated figures
 main.py

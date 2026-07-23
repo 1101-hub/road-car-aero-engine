@@ -156,11 +156,28 @@
           <output id="cAOut"></output>
         </div>
         <p style="color:var(--faint);font-size:12.5px;margin:8px 0 0">
-          Frontal area estimated as 0.84 × width × height (the standard
-          passenger-car fill factor). The modification physics is borrowed
-          from your body type's archetype — only the dimensions are yours —
-          so custom-car numbers carry an extra ±15% uncertainty, already
-          folded into the error bars shown above.</p>
+          Frontal area estimated per body-type fill factor (~0.78–0.82 ×
+          width × height). The modification physics is borrowed from your body
+          type's archetype — only the dimensions are yours — so custom-car
+          numbers carry an extra ±15% uncertainty, already folded into the
+          error bars shown above.</p>
+      </div>
+      <div class="scan" id="scanPanel">
+        <p class="hint">Upload a <b>side-on</b> photo of your car, then drag the
+        seven dots onto the matching spots. The shape sets the drag; the
+        wheelbase sets the size. This runs entirely on your device.</p>
+        <div class="stage" id="scanStage">
+          <canvas id="scanCanvas" width="900" height="380"></canvas>
+          <div class="drop" id="scanDrop">tap to choose a side photo of your car</div>
+        </div>
+        <div class="ctl">
+          <input type="file" id="scanFile" accept="image/*" hidden>
+          <button class="ghost" id="scanPick">choose photo</button>
+          <label>wheelbase <input type="number" id="scanWB" value="2.45" step="0.01" min="2.0" max="3.2"> m</label>
+          <span style="color:var(--faint);font-size:12px">(from your car's spec sheet)</span>
+          <button class="act" id="scanGo">read my car →</button>
+        </div>
+        <div class="found" id="scanFound"></div>
       </div>
     </div>
   </section>
@@ -385,7 +402,8 @@ function scaleTier(t, A, fuel){
                                dCd_unc: t.dCd * rel});
 }
 function rebuildCustom(){
-  const A = 0.84 * cust.W * cust.H;
+  const FILL = {hatchback: 0.785, sedan: 0.805, suv: 0.821};
+  const A = (FILL[cust.arch] || 0.80) * cust.W * cust.H;
   const rep = RECO.cars.find(c => c.id === RECO.arch_reps[cust.arch]);
   state.custom = {
     id: "custom",
@@ -420,6 +438,144 @@ document.getElementById("cFuel").addEventListener("click", e => {
     x.setAttribute("aria-pressed", x === b ? "true" : "false"));
   rebuildCustom();
 });
+
+/* ── photo scanner: the same landmark math validated in core/vision.py,
+   ported to run on the user's device. Seven tapped points -> body type +
+   size -> the tested custom-car engine above. No segmentation, no server. */
+const SCAN_WIDTH = {hatchback: 1.75, sedan: 1.80, suv: 1.85};
+const scanChip = document.createElement("button");
+scanChip.className = "car";
+scanChip.innerHTML = '\ud83d\udcf7 Scan your car'
+  + '<span class="cd">from a side photo \u00b7 any make</span>';
+scanChip.addEventListener("click", () => {
+  const panel = document.getElementById("scanPanel");
+  panel.style.display = "block";
+  document.getElementById("customForm").style.display = "none";
+  panel.scrollIntoView({behavior: "smooth", block: "nearest"});
+});
+carBox.appendChild(scanChip);
+
+(function scanner(){
+  const canvas = document.getElementById("scanCanvas");
+  const ctx = canvas.getContext("2d");
+  const drop = document.getElementById("scanDrop");
+  let img = null;
+  const LM = [
+    ["front_wheel", "front wheel", 0.22, 0.82],
+    ["rear_wheel",  "rear wheel",  0.72, 0.82],
+    ["nose",        "nose",        0.06, 0.60],
+    ["windshield_base", "windscreen base", 0.34, 0.52],
+    ["roof_front",  "roof front",  0.44, 0.30],
+    ["roof_rear",   "roof rear",   0.74, 0.30],
+    ["tail_top",    "tail top",    0.93, 0.44],
+  ];
+  const COL = {front_wheel:"#E8EEF7", rear_wheel:"#E8EEF7", nose:"#5FB8E8",
+    windshield_base:"#1FD4E8", roof_front:"#7FB8E8", roof_rear:"#FF6B3D",
+    tail_top:"#C22B8A"};
+  let pts = LM.map(([id,,fx,fy]) => ({id, x: fx*canvas.width, y: fy*canvas.height}));
+  let drag = -1;
+
+  function draw(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if (img){
+      const s = Math.min(canvas.width/img.width, canvas.height/img.height);
+      const w = img.width*s, h = img.height*s;
+      ctx.globalAlpha = 0.9;
+      ctx.drawImage(img, (canvas.width-w)/2, (canvas.height-h)/2, w, h);
+      ctx.globalAlpha = 1;
+    }
+    // connect roofline & underside for guidance
+    const P = id => pts.find(p => p.id === id);
+    ctx.strokeStyle = "rgba(127,184,232,.5)"; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (const id of ["nose","windshield_base","roof_front","roof_rear","tail_top"]){
+      const p = P(id); ctx.lineTo(p.x, p.y);
+    } ctx.stroke();
+    for (const p of pts){
+      ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, 7);
+      ctx.fillStyle = COL[p.id]; ctx.globalAlpha = 0.25; ctx.fill();
+      ctx.globalAlpha = 1; ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, 7);
+      ctx.fillStyle = COL[p.id]; ctx.fill();
+      ctx.fillStyle = "#F4F1FA"; ctx.font = "11px monospace";
+      const lbl = LM.find(l => l[0] === p.id)[1];
+      ctx.fillText(lbl, p.x + 9, p.y - 6);
+    }
+  }
+  draw();
+
+  function evtXY(e){
+    const r = canvas.getBoundingClientRect();
+    const t = e.touches ? e.touches[0] : e;
+    return {x: (t.clientX-r.left)*canvas.width/r.width,
+            y: (t.clientY-r.top)*canvas.height/r.height};
+  }
+  function down(e){
+    const {x,y} = evtXY(e);
+    let best=-1, bd=1e9;
+    pts.forEach((p,i)=>{const d=Math.hypot(p.x-x,p.y-y); if(d<bd){bd=d;best=i;}});
+    if (bd < 26) { drag = best; e.preventDefault(); }
+  }
+  function move(e){ if(drag<0) return; const {x,y}=evtXY(e); pts[drag].x=x; pts[drag].y=y; draw(); e.preventDefault(); }
+  function up(){ drag=-1; }
+  canvas.addEventListener("mousedown",down); canvas.addEventListener("mousemove",move);
+  window.addEventListener("mouseup",up);
+  canvas.addEventListener("touchstart",down,{passive:false});
+  canvas.addEventListener("touchmove",move,{passive:false});
+  canvas.addEventListener("touchend",up);
+
+  function loadFile(f){
+    const url = URL.createObjectURL(f);
+    const im = new Image();
+    im.onload = () => { img = im; drop.style.display="none"; draw(); URL.revokeObjectURL(url); };
+    im.src = url;
+  }
+  document.getElementById("scanPick").addEventListener("click",
+    () => document.getElementById("scanFile").click());
+  drop.addEventListener("click", () => document.getElementById("scanFile").click());
+  document.getElementById("scanFile").addEventListener("change", e => {
+    if (e.target.files[0]) loadFile(e.target.files[0]);
+  });
+
+  function classify(rwa, trunk, H){
+    if (rwa < 42 && trunk < 0.78) return "sedan";
+    if (rwa >= 65 || (trunk > 0.92 && H > 0.38)) return "suv";
+    return "hatchback";
+  }
+  document.getElementById("scanGo").addEventListener("click", () => {
+    const P = id => { const p = pts.find(q=>q.id===id); return {x:p.x, y:-p.y}; };
+    const fw=P("front_wheel"), rw=P("rear_wheel"), nose=P("nose"),
+          wb=P("windshield_base"), rf=P("roof_front"), rr=P("roof_rear"), tt=P("tail_top");
+    const ground = Math.min(fw.y, rw.y), roof = Math.max(rf.y, rr.y);
+    const height = roof - ground;
+    const length = Math.abs(Math.max(rf.x,rr.x,tt.x) - nose.x);
+    if (height < 20 || length < 40){ document.getElementById("scanFound").textContent =
+      "place the dots on the car first"; return; }
+    const H = height/length;
+    const ws = Math.atan2(rf.y - wb.y, Math.abs(rf.x-wb.x)+1e-6)*180/Math.PI;
+    const rwa = Math.atan2(roof - tt.y, Math.abs(tt.x-rr.x)+1e-6)*180/Math.PI;
+    const trunk = (tt.y - ground)/height;
+    const arch = classify(rwa, trunk, H);
+    const wbnorm = Math.abs(rw.x - fw.x)/length;
+    const wheelbase_m = parseFloat(document.getElementById("scanWB").value) || 2.45;
+    const length_m = wheelbase_m / wbnorm;
+    const height_m = Math.max(1.40, Math.min(1.95, H * length_m));
+    const width_m = SCAN_WIDTH[arch];
+
+    cust.arch = arch; cust.W = width_m; cust.H = height_m;
+    const cW = document.getElementById("cW"), cH = document.getElementById("cH");
+    cW.value = width_m; cH.value = height_m; syncOutputs && 0;
+    document.getElementById("cWOut").textContent = width_m.toFixed(2)+" m";
+    document.getElementById("cHOut").textContent = height_m.toFixed(2)+" m";
+    [...document.getElementById("cBody").children].forEach(x =>
+      x.setAttribute("aria-pressed", x.dataset.a === arch ? "true":"false"));
+    document.getElementById("scanFound").innerHTML =
+      "read your car: <b>" + arch + "</b> \u00b7 windscreen " + ws.toFixed(0)
+      + "\u00b0, rear " + rwa.toFixed(0) + "\u00b0 \u00b7 ~" + length_m.toFixed(1)
+      + " m long, " + height_m.toFixed(2) + " m tall \u2192 recommendation below";
+    rebuildCustom();
+    document.getElementById("verdict").scrollIntoView({behavior:"smooth", block:"start"});
+  });
+})();
 
 /* ── render verdict + tiers ── */
 function modList(tier){
