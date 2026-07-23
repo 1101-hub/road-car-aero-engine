@@ -113,6 +113,47 @@ def _tier_payload(car_key: str, sol, baseline_Cd: float,
     return payload
 
 
+# One representative setting per modification for the interactive toggles — the
+# same aggressive-but-legal-geometry values the grid explores.
+MOD_SETTINGS = {
+    "wheel_covers": dict(n_wheels_covered=4),
+    "underbody_panel": dict(coverage_fraction=1.0),
+    "front_splitter": dict(depth_mm=60.0),
+    "side_skirts": dict(height_mm=50.0, coverage_fraction=0.75),
+    "rear_spoiler": dict(chord_m=0.25, angle_deg=8.0, span_fraction=0.85),
+    "rear_diffuser": dict(angle_deg=7.0, length_norm=0.14),
+}
+
+
+def _mod_options(base_solve) -> list:
+    """Each modification applied on its own to the baseline: its ΔCd, the budget
+    line it draws from, cost, legality and confidence. The page sums a chosen
+    subset live, so the user can assemble any combination and watch the flow,
+    budget and savings respond."""
+    from core.modifications import (apply_mod_set, mod_wheel_covers,
+        mod_underbody_panel, mod_front_splitter, mod_side_skirts,
+        mod_rear_spoiler, mod_rear_diffuser)
+    from core.uncertainty import MOD_UNCERTAINTY
+    fns = {"wheel_covers": mod_wheel_covers, "underbody_panel": mod_underbody_panel,
+           "front_splitter": mod_front_splitter, "side_skirts": mod_side_skirts,
+           "rear_spoiler": mod_rear_spoiler, "rear_diffuser": mod_rear_diffuser}
+    out = []
+    for mid, kwargs in MOD_SETTINGS.items():
+        ms = apply_mod_set(base_solve, [(fns[mid], kwargs)])
+        r = ms.modifications[0]
+        legality, _ = MOD_LEGALITY[mid]
+        tag, _reason = confidence_of(mid)
+        lo, hi, _buys = MOD_COST_INR[mid]
+        out.append(dict(
+            id=mid, label=MOD_LABELS[mid],
+            dCd=round(max(r.delta_Cd, 0.0) if r.feasible else 0.0, 4),
+            unc=MOD_UNCERTAINTY.get(mid, (0.5,))[0],
+            component=MOD_COMPONENT[mid], feasible=bool(r.feasible),
+            legal=("ok" if legality is Legality.OK else "rto"),
+            cost_lo=lo, cost_hi=hi, confidence=tag))
+    return out
+
+
 def _archetype_flow(car_key, nx=200, ny=100):
     """Precompute a particle-advection velocity field + outline for one car,
     so the recommendation page can show live airflow without a solver in the
@@ -209,6 +250,7 @@ def export_recommend(html_path: str = "web/recommend.html",
             Cd_published=info["reference_Cd"],
             Cpb=round(baseline["Cpb"], 3),
             budget={k: round(float(baseline[k]), 4) for k in BUDGET_KEYS},
+            mod_options=_mod_options(baseline),
             fuel=info.get("fuel_type", "petrol"),
             kerb_kg=info["kerb_weight_kg"],
             belly_ok=bool(comp.belly_actual_mm >= comp.belly_required_mm),
