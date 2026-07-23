@@ -492,6 +492,71 @@ def render_banner(car_key: str = "maruti_swift",
         print(f"  banner -> {save_path}")
 
 
+
+def render_readme_banner(save_path: str = "output/readme_banner.png"):
+    """TVA-terminal masthead for the GitHub README: warm-black CRT, amber
+    phosphor type, nested bronze bezel, the Swift's computed pressure field, and
+    scanlines. GitHub strips CSS from markdown, so the aesthetic has to live in a
+    rendered image — this is it."""
+    from matplotlib.patches import FancyBboxPatch
+    import matplotlib.patheffects as pe
+    from matplotlib.path import Path as MplPath
+    BG, BRONZE, BRONZE2 = "#161009", "#5A4227", "#836035"
+    AMBER_B, CREAM, FAINT, OK = "#F6AC4E", "#F0E4C9", "#8B7550", "#AEBB74"
+
+    params, car = get_car_params("maruti_swift")
+    res = solve(params, n_panels=400)
+    coords, pg, sigma = res["coords"], res["pg"], res["sigma"]
+    gx = np.linspace(-0.7, 2.4, 460); gy = np.linspace(-0.30, 0.60, 150)
+    GX, GY = np.meshgrid(gx, gy)
+    u, v = field_velocity(pg, sigma, V_REF, GX.ravel(), GY.ravel())
+    U, V = (u/V_REF).reshape(GY.shape), (v/V_REF).reshape(GY.shape)
+    Cp = 1.0 - (U**2 + V**2)
+    in_body = MplPath(coords).contains_points(
+        np.column_stack([GX.ravel(), GY.ravel()])).reshape(GY.shape)
+    iri = LinearSegmentedColormap.from_list("iri", [
+        "#1FD4E8", "#2E8FE0", "#123B8C", BG, "#5B1E7A", "#C22B8A", "#FF6B3D"])
+    norm = TwoSlopeNorm(vmin=-1.3, vcenter=0.0, vmax=1.0)
+
+    fig = plt.figure(figsize=(16.0, 4.6), dpi=100); fig.patch.set_facecolor(BG)
+    ax = fig.add_axes([0, 0, 1, 1]); ax.set_facecolor(BG)
+    ax.set_xlim(0, 1600); ax.set_ylim(0, 460); ax.axis("off")
+    axf = fig.add_axes([0.52, 0.14, 0.45, 0.72]); axf.axis("off")
+    axf.pcolormesh(GX, GY, np.ma.masked_where(in_body, Cp), cmap=iri, norm=norm,
+                   shading="gouraud", alpha=0.9)
+    axf.streamplot(gx, gy, np.where(in_body, np.nan, U), np.where(in_body, np.nan, V),
+                   color=CREAM, density=1.1, linewidth=0.3, arrowsize=0.0)
+    axf.fill(coords[:,0], coords[:,1], color=BG, zorder=4)
+    axf.plot(coords[:,0], coords[:,1], color=BRONZE2, lw=1.0, zorder=5)
+    axf.set_xlim(-0.7, 2.2); axf.set_ylim(-0.30, 0.55)
+    for pad, lw, col in [(18, 2.2, BRONZE2), (30, 1.2, BRONZE)]:
+        ax.add_patch(FancyBboxPatch((pad, pad), 1600-2*pad, 460-2*pad,
+            boxstyle="round,pad=0,rounding_size=22", linewidth=lw,
+            edgecolor=col, facecolor="none"))
+    for y in range(34, 428, 3):
+        ax.plot([34, 1566], [y, y], color="#000000", lw=0.5, alpha=0.16, zorder=6)
+    ax.add_patch(plt.Circle((70, 392), 13, color="#E68A2B", zorder=7))
+    ax.add_patch(plt.Circle((74, 396), 4.5, color=BG, zorder=8))
+    ax.text(96, 388, "CASE FILE · AERODYNAMICS", color=FAINT, fontsize=11,
+            family="monospace", zorder=7, va="center", fontweight="bold")
+    ax.text(500, 388, "STATUS: OPEN", color=OK, fontsize=11, family="monospace",
+            va="center", zorder=7, fontweight="bold")
+    glow = [pe.withStroke(linewidth=8, foreground="#4a2a08"), pe.Normal()]
+    ax.text(70, 300, "PHYSICS-FIRST", color=CREAM, fontsize=40, family="monospace",
+            fontweight="bold", va="center", zorder=7).set_path_effects(
+                [pe.withStroke(linewidth=6, foreground="#3a1f08"), pe.Normal()])
+    ax.text(70, 244, "AERODYNAMIC FUEL", color=AMBER_B, fontsize=40, family="monospace",
+            fontweight="bold", va="center", zorder=7).set_path_effects(glow)
+    ax.text(70, 190, "OPTIMIZER", color=AMBER_B, fontsize=40, family="monospace",
+            fontweight="bold", va="center", zorder=7).set_path_effects(glow)
+    ax.text(70, 132, "point a phone at any car → the parts that cut its fuel bill",
+            color=CREAM, fontsize=13, family="monospace", va="center", zorder=7)
+    ax.text(70, 106, "real fluid physics · computer vision · every number tested",
+            color=FAINT, fontsize=12, family="monospace", va="center", zorder=7)
+    fig.savefig(save_path, dpi=100, facecolor=BG)
+    plt.close(fig)
+    print(f"  README banner -> {save_path}")
+
 if __name__ == "__main__":
     import os
     import sys
@@ -502,5 +567,6 @@ if __name__ == "__main__":
                 save_png="output/flow_maruti_swift.png",
                 save_gif="output/flow_maruti_swift.gif")
     render_banner()
+    render_readme_banner()
     if os.path.isfile("web/flow_explorer.html"):
         export_web()

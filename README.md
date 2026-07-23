@@ -1,8 +1,8 @@
-![The Maruti Swift's computed pressure field — cyan/blue suction, magenta/orange pressure, rendered from this repository's own solver](output/banner.png)
+<img src="output/readme_banner.png" alt="Physics-First Aerodynamic Fuel Optimizer — point a phone at any car and find the parts that cut its fuel bill; real fluid physics, computer vision, every number tested" width="100%">
 
 # Physics-First Aerodynamic Fuel Optimizer
 
-![Python](https://img.shields.io/badge/python-3.10+-blue) ![Panel method](https://img.shields.io/badge/physics-panel%20method-green) ![Computer vision](https://img.shields.io/badge/AI-computer%20vision-orange) ![Tests](https://img.shields.io/badge/tests-408%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Python](https://img.shields.io/badge/python-3.10+-836035?style=flat-square&labelColor=161009) ![Physics](https://img.shields.io/badge/method-panel_method-E68A2B?style=flat-square&labelColor=161009) ![Computer vision](https://img.shields.io/badge/AI-computer_vision-E68A2B?style=flat-square&labelColor=161009) ![Tests](https://img.shields.io/badge/tests-408_passing-AEBB74?style=flat-square&labelColor=161009) ![License](https://img.shields.io/badge/license-MIT-5A4227?style=flat-square&labelColor=161009)
 
 **Point a phone at any car and find the bolt-on parts that cut its fuel bill** — which modification, at what geometry, on that specific car, actually reduces drag, by how much, at what cost, and whether it's legal to fit in India. A computer-vision front-end reads the car's shape straight from a photo; a first-principles fluid-physics engine does the rest. No black-box models — every number traces to a fluid-dynamics equation, a measured dimension, or a public standard, and every claim is enforced by a test.
 
@@ -50,7 +50,7 @@ Numbers second, physics first — this is what the solver actually computes:
 
 Every streamline is evaluated from this repository's own panel solution — the same source strengths that produce the Cd numbers — not stock CFD footage. The hatched region is drawn honestly: past the separation point, potential flow stops being true, so the picture stops pretending and labels the wake as the zone handled by the base-pressure model. That pocket of dead air is roughly 60% of the aerodynamic fuel bill, and shrinking it is what every modification here is for.
 
-**Interactive version:** open [`web/flow_explorer.html`](web/flow_explorer.html) in any browser (no install, no server — the solver's output is embedded in the file). Live particles, ten switchable cars, a hover probe reading local speed and pressure, and the drag budget updating per car. Keys: `1–9` cars, `space` pause, `A` annotations.
+**Interactive version:** open [`web/flow_explorer.html`](web/flow_explorer.html) in any browser (no install, no server — the solver's output is embedded in the file). Live particles, ten switchable cars, a hover probe reading local speed and pressure, and the drag budget updating per car. Keys: <kbd>1</kbd>–<kbd>9</kbd> switch car · <kbd>space</kbd> pause · <kbd>A</kbd> annotations · <kbd>F</kbd> pressure field.
 
 Regenerate everything with `python -m core.flowviz` — including the banner above, which is not artwork: it is the Swift's computed pressure field in an iridescent palette (cyan/blue = suction, magenta/orange = pressure). The aesthetic is the data.
 
