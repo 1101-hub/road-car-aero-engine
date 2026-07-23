@@ -321,28 +321,29 @@ def render_flow(car_key: str = "maruti_swift", n_panels: int = 500,
 import base64
 import json
 
-WEB_GRID = dict(x_lo=-0.60, x_hi=2.20, y_lo=-0.50, y_hi=0.90, nx=280, ny=140)
+WEB_GRID = dict(x_lo=-0.60, x_hi=2.20, y_lo=-0.50, y_hi=0.90, nx=240, ny=120)
 Q_SCALE = 8000.0     # int16 quantisation: v/V_inf in [-4, 4] at 1.25e-4 steps
 
-# Four real cars spanning the shape spectrum: sedan -> hatch -> SUV -> boxy
-# body-on-frame SUV. The interactive story is the one the 2D field genuinely
-# shows: shape sets the separation point and base height, base height sets the
-# wake size, and the wake size tracks the drag number on screen.
+# Every car in the database, so the explorer offers the same fleet as the
+# recommender. Grid is trimmed slightly (240x120) to keep ten embedded fields
+# to a sensible page weight.
 #
-# An earlier draft included a "Swift + rear diffuser" toggle by steepening the
-# underbody exit geometry. The raw potential solve priced that variant at a
-# HIGHER Cd than baseline — correctly, in its own terms, because a diffuser's
-# real benefit is pressure recovery in the wake, a viscous effect potential
-# flow cannot contain (which is exactly why Layer 2 models the diffuser on the
-# drag budget instead of the panel geometry). An interactive toggle promising
-# "add diffuser, watch drag fall" would therefore have been a lie at the field
-# level, and it was cut. The tool must not show what the physics cannot.
-WEB_CONFIGS = [
-    ("city",    "Honda City (sedan)",   "honda_city", {}),
-    ("swift",   "Maruti Swift (hatch)", "maruti_swift", {}),
-    ("nexon",   "Tata Nexon (SUV)",     "tata_nexon", {}),
-    ("scorpio", "Scorpio-N (ladder SUV)", "mahindra_scorpio_n", {}),
-]
+# Note the honest limitation this makes visible: the 2D field can barely tell
+# cars WITHIN a class apart (the Swift, i20, Altroz and Baleno fields look
+# nearly identical), because a side silhouette does not carry the plan-view
+# detail that separates them. That sameness is not a bug in the viewer; it is
+# the documented boundary of a 2D method, shown rather than hidden.
+def _web_configs():
+    from core.panel_solver import INDIAN_CARS
+    short = {"hatchback": "hatch", "sedan": "sedan", "suv": "SUV"}
+    out = []
+    for key, info in INDIAN_CARS.items():
+        name = info["display_name"].split("(")[0].strip()
+        out.append((key, f"{name} ({short[info['archetype']]})", key, {}))
+    return out
+
+
+WEB_CONFIGS = _web_configs()
 
 
 def _b64_i16(arr: np.ndarray) -> str:
